@@ -1,0 +1,25 @@
+name: 'Qianwen Code Review'
+description: 'Automated code review using Alibaba Qianwen (通义千问) API'
+author: 'Your Name'
+inputs:
+  qianwen-api-key:
+    description: 'API key for Alibaba Qianwen (通义千问)'
+    required: true
+  qianwen-model:
+    description: 'Qianwen model to use (e.g., qwen-turbo, qwen-plus)'
+    required: false
+    default: 'qwen-turbo'
+  github-token:
+    description: 'GitHub token with pull-requests: write permission'
+    required: true
+    default: ${{ github.token }}
+  review-comment-title:
+    description: 'Title of the review comment'
+    required: false
+    default: '🤖 千问代码评审意见'
+runs:
+  using: 'node20'
+  main: 'dist/index.js'
+branding:
+  icon: 'code'
+  color: 'blue'
