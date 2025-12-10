@@ -1,16 +1,81 @@
 const axios = require('axios');
 const core = require('@actions/core');
 const github = require('@actions/github');
+const { parseDiff } = require('diff-parse'); // 新增依赖：用于解析diff
+
+// 解析diff获取受影响的文件列表
+function getFilesFromDiff(diff) {
+  const files = new Set();
+  const parsedDiff = parseDiff(diff);
+
+  parsedDiff.forEach(file => {
+    if (file.to) files.add(file.to);
+    if (file.from && file.from !== '/dev/null') files.add(file.from);
+  });
+
+  return Array.from(files);
+}
+
+// 获取变更文件的完整内容作为上下文
+async function getFileContents(githubToken, diff) {
+  const octokit = github.getOctokit(githubToken);
+  const context = github.context;
+  const files = getFilesFromDiff(diff);
+  const fileContents = {};
+
+  for (const file of files) {
+    try {
+      const { data } = await octokit.rest.repos.getContent({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        path: file,
+        ref: context.sha || context.payload.pull_request?.head?.sha
+      });
+
+      if (data.content) {
+        // 解码base64内容
+        fileContents[file] = Buffer.from(data.content, 'base64').toString('utf8');
+      }
+    } catch (error) {
+      core.warning(`无法获取文件内容 ${file}: ${error.message}`);
+    }
+  }
+
+  return fileContents;
+}
 
 // 调用千问API获取代码评审意见
-async function getQianwenReview(codeDiff, apiKey, model = 'qwen-turbo') {
+async function getQianwenReview(codeDiff, apiKey, model = 'qwen-turbo', fileContents = {}, ignoreComment = 'IGNORE') {
+  // 检查是否包含忽略标记
+  if (codeDiff.includes(ignoreComment)) {
+    return `检测到忽略标记 "${ignoreComment}"，已跳过代码评审`;
+  }
+
+  // 构建上下文信息
+  let contextInfo = '';
+  if (Object.keys(fileContents).length > 0) {
+    contextInfo = '相关文件完整内容（用于上下文理解）：\n';
+    for (const [file, content] of Object.entries(fileContents)) {
+      // 限制单个文件上下文长度，避免token超限
+      const truncatedContent = content.length > 5000 ? content.substring(0, 5000) + '...（内容过长已截断）' : content;
+      contextInfo += `\n===== ${file} =====\n${truncatedContent}\n`;
+    }
+  }
+
   const prompt = `
     你是一位资深的代码评审专家，请严格按照以下规则评审代码：
-    1. 指出代码中的错误、漏洞、性能问题、不规范写法；
-    2. 给出具体的修复建议和优化方案；
-    3. 语言简洁、专业，优先使用中文；
-    4. 仅评审diff中的代码，不扩展到其他内容；
-    5. 如果代码无问题，回复"代码评审通过，未发现明显问题"。
+    1. 重点检查：
+       - 拼写错误（变量名、函数名、注释中的文字）
+       - 命名规范（一致性、语义化、符合行业惯例）
+       - 语法错误和逻辑漏洞
+       - 性能问题和潜在风险
+    2. 给出具体的修复建议和优化方案，包括修改示例
+    3. 语言简洁、专业，优先使用中文
+    4. 结合提供的完整文件上下文理解代码意图
+    5. 如果代码无问题，回复"代码评审通过，未发现明显问题"
+    6. 评审时需要指出具体位置（行号或代码片段）
+
+    ${contextInfo ? contextInfo : '无额外上下文信息'}
 
     代码Diff内容：
     ${codeDiff}
@@ -31,8 +96,9 @@ async function getQianwenReview(codeDiff, apiKey, model = 'qwen-turbo') {
         },
         parameters: {
           result_format: 'text',
-          temperature: 0.3, // 低随机性，保证评审严谨
-          top_p: 0.8
+          temperature: 0.2, // 降低随机性，提高评审准确性
+          top_p: 0.8,
+          max_tokens: 2048 // 增加最大token限制
         }
       },
       {
@@ -40,7 +106,7 @@ async function getQianwenReview(codeDiff, apiKey, model = 'qwen-turbo') {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${apiKey}`
         },
-        timeout: 30000 // 30秒超时
+        timeout: 60000 // 延长超时时间到60秒
       }
     );
 
@@ -90,7 +156,7 @@ async function getCodeDiff(githubToken) {
   const context = github.context;
 
   if (!context.payload.pull_request) {
-    // Push事件：获取本次提交的diff（简化版，仅获取当前提交）
+    // Push事件：获取本次提交的diff
     const { data: diffData } = await octokit.rest.repos.getCommit({
       owner: context.repo.owner,
       repo: context.repo.repo,
@@ -117,5 +183,6 @@ async function getCodeDiff(githubToken) {
 module.exports = {
   getQianwenReview,
   submitReviewToGitHub,
-  getCodeDiff
+  getCodeDiff,
+  getFileContents
 };
