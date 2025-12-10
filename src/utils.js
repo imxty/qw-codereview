@@ -1,16 +1,21 @@
 const axios = require('axios');
 const core = require('@actions/core');
 const github = require('@actions/github');
-const { parseDiff } = require('diff-parse'); // 新增依赖：用于解析diff
 
-// 解析diff获取受影响的文件列表
+// 【修复】原生解析diff获取受影响文件列表（不再依赖diff-parse）
 function getFilesFromDiff(diff) {
   const files = new Set();
-  const parsedDiff = parseDiff(diff);
+  const lines = diff.split('\n');
 
-  parsedDiff.forEach(file => {
-    if (file.to) files.add(file.to);
-    if (file.from && file.from !== '/dev/null') files.add(file.from);
+  // 匹配diff中的文件行（格式：diff --git a/xxx b/xxx 或 --- a/xxx / +++ b/xxx）
+  const fileLineRegex = /^(diff --git a\/|--- a\/|\+\+\+ b\/)(.+?)(\s|$)/;
+
+  lines.forEach(line => {
+    const match = line.match(fileLineRegex);
+    if (match && match[2]) {
+      const fileName = match[2].replace(/\/dev\/null/, ''); // 过滤空文件标记
+      if (fileName) files.add(fileName);
+    }
   });
 
   return Array.from(files);
