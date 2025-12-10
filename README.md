@@ -37,7 +37,7 @@ on:
 # 配置Action所需权限
 permissions:
   pull-requests: write  # 允许评论PR
-  contents: read        # 允许读取代码Diff
+  contents: write        # 允许读取代码Diff
   statuses: write       # 可选：如需更新Commit状态
 
 jobs:
