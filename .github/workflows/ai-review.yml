@@ -20,7 +20,7 @@ jobs:
 
       # 使用自定义的千问Code Review Action
       - name: 千问代码评审
-        uses: imxty/test@v1  # 如果你将Action发布到GitHub Marketplace，替换为：username/qianwen-code-review-action@v1
+        uses: imxty/qw-codereview@v1  # 如果你将Action发布到GitHub Marketplace，替换为：username/qianwen-code-review-action@v1
         with:
           qianwen-api-key: ${{ secrets.QIANWEN_API_KEY }}  # 千问API Key（需在仓库Secrets中配置）
           qianwen-model: qwen-turbo  # 可选：qwen-plus/qwen-max
