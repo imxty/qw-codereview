@@ -17,6 +17,14 @@ inputs:
     description: 'Title of the review comment'
     required: false
     default: '🤖 千问代码评审意见'
+  ignore-comment:
+    description: 'Comment pattern to ignore review (default: IGNORE)'
+    required: false
+    default: 'IGNORE'
+  ignored-dirs:
+    description: 'Additional ignored directories (comma separated, e.g., docs/,test/)'
+    required: false
+    default: ''
 runs:
   using: 'node20'
   main: 'dist/index.js'
