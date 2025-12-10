@@ -33370,6 +33370,67 @@ function isFileIgnored(filePath) {
   });
 }
 
+// 过滤单个文件Diff中的忽略标记（仅跳过该文件）
+function filterFileDiffWithIgnoreComment(fileDiff, ignoreComment) {
+  if (fileDiff.includes(ignoreComment)) {
+    core.info(`检测到文件Diff包含忽略标记 "${ignoreComment}"，跳过该文件评审`);
+    return '';
+  }
+  return fileDiff;
+}
+
+// 过滤完整Diff内容（同时过滤忽略目录 + 忽略标记文件）
+function filterIgnoredFilesFromDiff(diffContent, ignoreComment = 'IGNORE') {
+  if (!diffContent) return '';
+
+  const diffLines = diffContent.split('\n');
+  const filteredLines = [];
+  let skipCurrentFile = false;
+  let currentFileDiff = [];
+
+  for (const line of diffLines) {
+    const fileHeaderMatch = line.match(/^diff --git a\/(.+?) b\/(.+?)$/);
+    if (fileHeaderMatch) {
+      // 处理上一个文件的Diff
+      if (currentFileDiff.length > 0) {
+        const prevFileDiff = currentFileDiff.join('\n');
+        if (!skipCurrentFile) {
+          const filteredPrevFileDiff = filterFileDiffWithIgnoreComment(prevFileDiff, ignoreComment);
+          if (filteredPrevFileDiff) {
+            filteredLines.push(filteredPrevFileDiff);
+          }
+        }
+        currentFileDiff = [];
+      }
+
+      // 检查新文件是否在忽略目录
+      const filePath = fileHeaderMatch[1] || fileHeaderMatch[2];
+      skipCurrentFile = isFileIgnored(filePath);
+      currentFileDiff.push(line);
+      continue;
+    }
+
+    if (currentFileDiff.length > 0) {
+      currentFileDiff.push(line);
+    }
+  }
+
+  // 处理最后一个文件的Diff
+  if (currentFileDiff.length > 0) {
+    const lastFileDiff = currentFileDiff.join('\n');
+    if (!skipCurrentFile) {
+      const filteredLastFileDiff = filterFileDiffWithIgnoreComment(lastFileDiff, ignoreComment);
+      if (filteredLastFileDiff) {
+        filteredLines.push(filteredLastFileDiff);
+      }
+    }
+  }
+
+  const filteredDiff = filteredLines.join('\n').trim();
+  core.info(`Diff过滤后长度：${filteredDiff.length} 字符`);
+  return filteredDiff;
+}
+
 // 原生解析diff获取受影响文件列表（增加过滤）
 function getFilesFromDiff(diff) {
   const files = new Set();
@@ -33425,39 +33486,11 @@ async function getFileContents(githubToken, diff) {
   return fileContents;
 }
 
-// 过滤Diff内容中的忽略文件
-function filterIgnoredFilesFromDiff(diffContent) {
-  if (!diffContent) return '';
-
-  const diffLines = diffContent.split('\n');
-  const filteredLines = [];
-  let skipCurrentFile = false;
-
-  for (const line of diffLines) {
-    const fileHeaderMatch = line.match(/^diff --git a\/(.+?) b\/(.+?)$/);
-    if (fileHeaderMatch) {
-      const filePath = fileHeaderMatch[1] || fileHeaderMatch[2];
-      skipCurrentFile = isFileIgnored(filePath);
-      if (!skipCurrentFile) {
-        filteredLines.push(line);
-      }
-      continue;
-    }
-
-    if (!skipCurrentFile) {
-      filteredLines.push(line);
-    }
-  }
-
-  const filteredDiff = filteredLines.join('\n').trim();
-  core.info(`Diff过滤后长度：${filteredDiff.length} 字符`);
-  return filteredDiff;
-}
-
-// 获取代码Diff（兼容大文件数量PR + 过滤忽略目录 + 修复Diff获取逻辑）
+// 获取代码Diff（兼容大文件数量PR + 过滤忽略目录/忽略标记）
 async function getCodeDiff(githubToken) {
   const octokit = github.getOctokit(githubToken);
   const context = github.context;
+  const ignoreComment = core.getInput('ignore-comment') || 'IGNORE';
 
   if (!context.payload.pull_request) {
     core.info('处理Push事件，获取Commit Diff');
@@ -33470,7 +33503,7 @@ async function getCodeDiff(githubToken) {
           format: 'diff'
         }
       });
-      return filterIgnoredFilesFromDiff(diffData);
+      return filterIgnoredFilesFromDiff(diffData, ignoreComment);
     } catch (error) {
       core.error(`获取Push事件Diff失败：${error.message}`);
       throw error;
@@ -33491,12 +33524,11 @@ async function getCodeDiff(githubToken) {
         format: 'diff'
       }
     });
-    return filterIgnoredFilesFromDiff(diffData);
+    return filterIgnoredFilesFromDiff(diffData, ignoreComment);
   } catch (error) {
     if (error.message.includes('too_large') || error.message.includes('maximum number of files')) {
       core.warning('PR文件数量超限，将逐个获取非忽略文件的Diff');
 
-      // 获取PR文件列表（包含每个文件的patch字段）
       const { data: files } = await octokit.rest.pulls.listFiles({
         owner,
         repo,
@@ -33504,24 +33536,25 @@ async function getCodeDiff(githubToken) {
         per_page: 100
       });
 
-      // 过滤忽略文件
       const nonIgnoredFiles = files.filter(file => !isFileIgnored(file.filename));
-      core.info(`PR中共变更 ${files.length} 个文件，过滤后剩余 ${nonIgnoredFiles.length} 个非忽略文件`);
+      core.info(`PR中共变更 ${files.length} 个文件，过滤忽略目录后剩余 ${nonIgnoredFiles.length} 个文件`);
 
-      // 限制最多处理50个文件的diff
       const limitedFiles = nonIgnoredFiles.slice(0, 50);
-      core.info(`将获取前 ${limitedFiles.length} 个非忽略文件的Diff`);
+      core.info(`将处理前 ${limitedFiles.length} 个非忽略目录文件（含忽略标记过滤）`);
 
-      // 直接用listFiles返回的patch拼接Diff（无需额外调用API）
       let combinedDiff = '';
       for (const file of limitedFiles) {
         if (file.patch) {
-          combinedDiff += `diff --git a/${file.filename} b/${file.filename}\n${file.patch}\n\n`;
+          const fileDiff = `diff --git a/${file.filename} b/${file.filename}\n${file.patch}`;
+          const filteredFileDiff = filterFileDiffWithIgnoreComment(fileDiff, ignoreComment);
+          if (filteredFileDiff) {
+            combinedDiff += filteredFileDiff + '\n\n';
+          }
         }
       }
 
       if (!combinedDiff) {
-        core.info('所有变更文件均为忽略目录下的文件，跳过评审');
+        core.info('所有变更文件均为忽略目录/包含忽略标记的文件，跳过评审');
         return '';
       }
       return combinedDiff;
@@ -33530,14 +33563,10 @@ async function getCodeDiff(githubToken) {
   }
 }
 
-// 调用千问API获取代码评审意见
+// 调用千问API获取代码评审意见（移除全局跳过逻辑）
 async function getQianwenReview(codeDiff, apiKey, model = 'qwen-turbo', fileContents = {}, ignoreComment = 'IGNORE') {
-  if (codeDiff.includes(ignoreComment)) {
-    return `检测到忽略标记 "${ignoreComment}"，已跳过代码评审`;
-  }
-
   if (!codeDiff || codeDiff.trim() === '') {
-    return '所有变更文件均为忽略目录下的文件，代码评审通过';
+    return '所有变更文件均为忽略目录/包含忽略标记的文件，代码评审通过';
   }
 
   const maxDiffLength = 20000;
