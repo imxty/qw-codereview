@@ -7,7 +7,7 @@ const BASE_IGNORED_DIRS = [
   'bin/', 'build/', 'dist/', 'generate_db_struct/', 'conf/', 'vendor/', 'node_modules/', 'tmp/',
   'logs/', 'cache/', 'coverage/', 'public/', 'assets/', 'static/', 'lib/', 'libs/', 'target/', 'out/', 'output/', 'temp/',
   '.git/', '.svn/', '.hg/', '.idea/', '.vscode/', 'bower_components/', 'jspm_packages/', 'typings/',
-  'npm-debug.log', 'yarn-error.log', 'pnpm-lock.yaml', 'package-lock.json', 'yarn.lock', 'composer.lock'
+  'npm-debug.log/', 'yarn-error.log/', 'pnpm-lock.yaml/', 'package-lock.json/', 'yarn.lock/', 'composer.lock/'
 ];
 
 // 合并基础忽略目录 + 自定义忽略目录
@@ -87,27 +87,6 @@ async function getFileContents(githubToken, diff) {
   return fileContents;
 }
 
-// 【修复核心】获取单个文件的diff内容（修正Octokit方法名：getFile → getPullRequestFile）
-async function getSingleFileDiff(octokit, owner, repo, pullNumber, filePath) {
-  if (isFileIgnored(filePath)) {
-    core.debug(`跳过忽略文件的Diff获取：${filePath}`);
-    return '';
-  }
-  try {
-    // 正确方法名：rest.pulls.getPullRequestFile
-    const { data } = await octokit.rest.pulls.getPullRequestFile({
-      owner,
-      repo,
-      pull_number: pullNumber,
-      file_path: filePath
-    });
-    return `diff --git a/${filePath} b/${filePath}\n${data.patch || ''}`;
-  } catch (error) {
-    core.warning(`无法获取文件 ${filePath} 的diff: ${error.message}`);
-    return '';
-  }
-}
-
 // 过滤Diff内容中的忽略文件
 function filterIgnoredFilesFromDiff(diffContent) {
   if (!diffContent) return '';
@@ -137,7 +116,7 @@ function filterIgnoredFilesFromDiff(diffContent) {
   return filteredDiff;
 }
 
-// 获取代码Diff（兼容大文件数量PR + 过滤忽略目录）
+// 获取代码Diff（兼容大文件数量PR + 过滤忽略目录 + 修复Diff获取逻辑）
 async function getCodeDiff(githubToken) {
   const octokit = github.getOctokit(githubToken);
   const context = github.context;
@@ -179,6 +158,7 @@ async function getCodeDiff(githubToken) {
     if (error.message.includes('too_large') || error.message.includes('maximum number of files')) {
       core.warning('PR文件数量超限，将逐个获取非忽略文件的Diff');
 
+      // 获取PR文件列表（包含每个文件的patch字段）
       const { data: files } = await octokit.rest.pulls.listFiles({
         owner,
         repo,
@@ -186,17 +166,19 @@ async function getCodeDiff(githubToken) {
         per_page: 100
       });
 
+      // 过滤忽略文件
       const nonIgnoredFiles = files.filter(file => !isFileIgnored(file.filename));
       core.info(`PR中共变更 ${files.length} 个文件，过滤后剩余 ${nonIgnoredFiles.length} 个非忽略文件`);
 
+      // 限制最多处理50个文件的diff
       const limitedFiles = nonIgnoredFiles.slice(0, 50);
       core.info(`将获取前 ${limitedFiles.length} 个非忽略文件的Diff`);
 
+      // 直接用listFiles返回的patch拼接Diff（无需额外调用API）
       let combinedDiff = '';
       for (const file of limitedFiles) {
-        const fileDiff = await getSingleFileDiff(octokit, owner, repo, pullNumber, file.filename);
-        if (fileDiff) {
-          combinedDiff += fileDiff + '\n\n';
+        if (file.patch) {
+          combinedDiff += `diff --git a/${file.filename} b/${file.filename}\n${file.patch}\n\n`;
         }
       }
 
