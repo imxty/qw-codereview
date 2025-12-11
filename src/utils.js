@@ -54,9 +54,13 @@ function getFileDiffs(diffContent, ignoreComment = 'IGNORE') {
 
       // 初始化新文件
       currentFile = fileHeaderMatch[1] || fileHeaderMatch[2];
-      // 检查是否为新增文件（a/路径为/dev/null表示新增）
-      const isAddedFile = fileHeaderMatch[1] === '/dev/null';
-      skipCurrentFile = isFileIgnored(currentFile) || !isAddedFile;
+      // 判断文件状态（通过diff头信息推断）
+      const isRemovedFile = fileHeaderMatch[2] === '/dev/null'; // b/路径为/dev/null表示删除
+      const isRenamedFile = fileHeaderMatch[1] !== fileHeaderMatch[2] &&
+        !isRemovedFile &&
+        fileHeaderMatch[1] !== '/dev/null'; // 路径不同且非新增/删除表示重命名
+      // 仅跳过删除和重命名的文件，其他状态（新增/修改等）都保留
+      skipCurrentFile = isFileIgnored(currentFile) || isRemovedFile || isRenamedFile;
       currentLines = [line];
       continue;
     }
