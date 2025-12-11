@@ -33356,7 +33356,7 @@ function getCombinedIgnoredDirs() {
     .filter(dir => dir)
     .map(dir => dir.endsWith('/') ? dir : `${dir}/`);
   const combinedDirs = [...new Set([...BASE_IGNORED_DIRS, ...customIgnoredDirs])];
-  core.info(`最终忽略目录列表：${combinedDirs.join(', ')}`);
+  // core.info(`最终忽略目录列表：${combinedDirs.join(', ')}`);
   return combinedDirs;
 }
 
@@ -33745,8 +33745,8 @@ async function getQianwenReview(codeDiff, apiKey, model = 'qwen-turbo', fileCont
   // 最终返回结果（分片结果 + 全局总结）
   const finalResult = `
 ## 代码评审完整结果
-### 分片评审明细（共${diffChunks.length}片）：
-${reviewChunks.map((chunk, idx) => `\n#### 分片 ${idx + 1}\n${chunk}`).join('\n')}
+### 评审明细（共${diffChunks.length}段）：
+${reviewChunks.map((chunk, idx) => `\n#### 代码片段 ${idx + 1}\n${chunk}`).join('\n')}
 
 ---
 ### 全局评审总结
