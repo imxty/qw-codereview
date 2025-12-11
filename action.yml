@@ -28,7 +28,7 @@ inputs:
   batch-size:
     description: 'Number of files to review in one batch (avoid 429, 1-10)'
     required: false
-    default: '3'
+    default: '6'
   max-retries:
     description: 'Max retries for failed requests (1-5)'
     required: false
