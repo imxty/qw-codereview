@@ -33552,6 +33552,7 @@ async function reviewFile(fileName, fileDiff, apiKey, model) {
        - 无问题时回复"该文件修改无明显问题"
     5. 重点：
        - 只要说出有问题的地方即可，尽量简洁
+       - 函数，标签或变量等未定义,未使用等问题,不检查
 
     【文件路径】${fileName}
     【修改内容】
