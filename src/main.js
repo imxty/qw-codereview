@@ -9,8 +9,6 @@ async function run() {
         const githubToken = core.getInput('github-token');
         const reviewCommentTitle = core.getInput('review-comment-title');
         const ignoreComment = core.getInput('ignore-comment');
-        // TODO: 写死
-        qianwenModel = "qwen3-coder-plus"
         // 获取代码Diff（按文件分割）
         core.info('正在获取代码Diff...');
         const fileDiffs = await getCodeDiff(githubToken);
