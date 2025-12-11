@@ -33484,7 +33484,7 @@ async function getCodeDiff(githubToken) {
 
       // 仅保留新增文件（status为added）且不在忽略目录中
       const nonIgnoredFiles = allFiles.filter(file =>
-        file.status === 'added' && !isFileIgnored(file.filename)
+        file.status !== 'removed' && file.status !== 'renamed' && !isFileIgnored(file.filename)
       );
 
       core.info(`PR中共变更 ${allFiles.length} 个文件，过滤后剩余 ${nonIgnoredFiles.length} 个新增文件需处理`);
