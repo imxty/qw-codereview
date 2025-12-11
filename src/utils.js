@@ -205,6 +205,7 @@ async function reviewFile(fileName, fileDiff, apiKey, model) {
     3. 给出具体修复建议和修改示例
     4. 语言简洁专业，优先使用中文
     5. 无问题时回复"该文件修改无明显问题"
+    6. 不需要检查代码块未闭合，变量未定义，变量未使用等只靠局部代码无法看出来的问题。
 
     【文件路径】${fileName}
     【修改内容】
