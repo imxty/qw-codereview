@@ -33629,6 +33629,7 @@ async function getChunkReview(chunk, chunkIndex, totalChunks, fileContents, apiK
 async function getGlobalSummary(reviewChunks, apiKey, model) {
   const summaryPrompt = `
     你是一位资深的代码评审专家，请基于以下多个分片的代码评审结果，生成一份**全局、简洁、重点突出**的评审总结：
+    仅评审本次Diff中的**变更部分**（新增/修改的代码），不要评审文件中未变更的内容；
     1. 汇总所有分片的问题（去重、合并同类问题）
     2. 给出整体的修复建议和优化方向
     3. 明确判断代码是否"通过评审"（仅当所有分片均无问题时才判定为通过）
