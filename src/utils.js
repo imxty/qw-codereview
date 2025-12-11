@@ -4,10 +4,11 @@ const github = require('@actions/github');
 
 // 基础忽略目录列表（内置通用规则）
 const BASE_IGNORED_DIRS = [
-  'bin/', 'build/', 'dist/', 'generate_db_struct/', 'conf/', 'vendor/', 'node_modules/', 'tmp/',
-  'logs/', 'cache/', 'coverage/', 'public/', 'assets/', 'static/', 'lib/', 'libs/', 'target/', 'out/', 'output/', 'temp/',
-  '.git/', '.svn/', '.hg/', '.idea/', '.vscode/', 'bower_components/', 'jspm_packages/', 'typings/',
-  'npm-debug.log/', 'yarn-error.log/', 'pnpm-lock.yaml/', 'package-lock.json/', 'yarn.lock/', 'composer.lock/'
+  'bin/', 'build/', 'dist/', 'conf/', 'vendor/', 'node_modules/', 'tmp/',
+  'logs/', 'cache/', 'coverage/', 'public/', 'assets/', 'static/', 'lib/', 'libs/',
+  'target/', 'out/', 'output/', 'temp/', '.git/', '.svn/', '.hg/', '.idea/', '.vscode/',
+  'bower_components/', 'jspm_packages/', 'typings/', 'npm-debug.log/', 'yarn-error.log/',
+  'pnpm-lock.yaml/', 'package-lock.json/', 'yarn.lock/', 'composer.lock/'
 ];
 
 // 合并基础忽略目录 + 自定义忽略目录
@@ -17,8 +18,7 @@ function getCombinedIgnoredDirs() {
     .map(dir => dir.trim())
     .filter(dir => dir)
     .map(dir => dir.endsWith('/') ? dir : `${dir}/`);
-  const combinedDirs = [...new Set([...BASE_IGNORED_DIRS, ...customIgnoredDirs])];
-  return combinedDirs;
+  return [...new Set([...BASE_IGNORED_DIRS, ...customIgnoredDirs])];
 }
 
 // 判断文件是否在忽略目录中
@@ -103,11 +103,8 @@ async function getCodeDiff(githubToken) {
       owner,
       repo,
       pull_number: pullNumber,
-      mediaType: {
-        format: 'diff'
-      }
+      mediaType: { format: 'diff' }
     });
-    // 按文件分割Diff
     return getFileDiffs(diffData, ignoreComment);
   } catch (error) {
     if (error.message.includes('too_large') || error.message.includes('maximum number of files')) {
@@ -123,22 +120,21 @@ async function getCodeDiff(githubToken) {
       const nonIgnoredFiles = files.filter(file => !isFileIgnored(file.filename));
       core.info(`PR中共变更 ${files.length} 个文件，过滤忽略目录后剩余 ${nonIgnoredFiles.length} 个文件`);
 
-      const limitedFiles = nonIgnoredFiles.slice(0, 50);
+      const limitedFiles = nonIgnoredFiles.slice(0, 50); // 限制最大处理文件数
       core.info(`将处理前 ${limitedFiles.length} 个非忽略目录文件`);
 
       const fileDiffs = {};
       for (const file of limitedFiles) {
         if (file.patch) {
-          // 构建文件Diff
           const patchLines = file.patch.split('\n');
           const modifiedLines = patchLines.filter(line =>
-            line.startsWith('+') || line.startsWith('diff --git') || line.startsWith('index ') || line.startsWith('---') || line.startsWith('+++')
+            line.startsWith('+') || line.startsWith('diff --git') ||
+            line.startsWith('index ') || line.startsWith('---') || line.startsWith('+++')
           ).map(line => line.startsWith('+') && !line.startsWith('+++') ? line.substring(1) : line);
 
           const fileDiff = `diff --git a/${file.filename} b/${file.filename}\n${modifiedLines.join('\n')}`;
-          const filteredFileDiff = fileDiff.includes(ignoreComment) ? '' : fileDiff;
-          if (filteredFileDiff) {
-            fileDiffs[file.filename] = filteredFileDiff;
+          if (!fileDiff.includes(ignoreComment)) {
+            fileDiffs[file.filename] = fileDiff;
           }
         }
       }
@@ -146,6 +142,57 @@ async function getCodeDiff(githubToken) {
       return fileDiffs;
     }
     throw error;
+  }
+}
+
+// 分批处理Promise（控制并发）
+async function batchPromise(operations, batchSize = 3, maxRetries = 3) {
+  const results = [];
+  const totalBatches = Math.ceil(operations.length / batchSize);
+
+  for (let i = 0; i < operations.length; i += batchSize) {
+    const batchIndex = Math.floor(i / batchSize) + 1;
+    const batch = operations.slice(i, i + batchSize);
+    core.info(`处理第 ${batchIndex}/${totalBatches} 批，共 ${batch.length} 个文件`);
+
+    const batchResults = await Promise.all(
+      batch.map(operation => retryOperation(operation, maxRetries))
+    );
+    results.push(...batchResults);
+  }
+  return results;
+}
+
+// 失败重试机制（针对429限流）
+async function retryOperation(operation, maxRetries, baseDelay = 2000) {
+  let retries = 0;
+  while (true) {
+    try {
+      return await operation();
+    } catch (error) {
+      retries++;
+      if (retries >= maxRetries) {
+        core.error(`达到最大重试次数（${maxRetries}次），操作失败: ${error.message}`);
+        return {
+          fileName: error.message.includes('文件 ') ? error.message.split('文件 ')[1].split(' ')[0] : '未知文件',
+          review: `评审失败（已重试${maxRetries}次）: ${error.message}`
+        };
+      }
+
+      // 仅对429错误重试
+      if (error.response?.status !== 429) {
+        core.warning(`非限流错误，不重试: ${error.message}`);
+        return {
+          fileName: error.message.includes('文件 ') ? error.message.split('文件 ')[1].split(' ')[0] : '未知文件',
+          review: `评审失败: ${error.message}`
+        };
+      }
+
+      // 指数退避策略
+      const delay = baseDelay * Math.pow(2, retries - 1);
+      core.warning(`请求被限流（429），将在 ${delay}ms 后重试（第${retries}次）`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
   }
 }
 
@@ -173,14 +220,22 @@ async function reviewFile(fileName, fileDiff, apiKey, model) {
         parameters: { result_format: 'text', temperature: 0.2, max_tokens: 2048 }
       },
       {
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`
+        },
         timeout: 60000
       }
     );
-    return { fileName, review: response.data.output?.text?.trim() || '评审失败' };
+    return {
+      fileName,
+      review: response.data.output?.text?.trim() || '评审失败：无返回内容'
+    };
   } catch (error) {
-    core.error(`文件 ${fileName} 评审失败: ${error.message}`);
-    return { fileName, review: `评审失败: ${error.message}` };
+    const errorMsg = error.response
+      ? `状态码 ${error.response.status}，原因：${error.response.data?.message || '未知错误'}`
+      : error.message;
+    throw new Error(`文件 ${fileName} 评审失败: ${errorMsg}`);
   }
 }
 
@@ -207,7 +262,10 @@ async function getGlobalSummary(fileReviews, apiKey, model) {
         parameters: { result_format: 'text', temperature: 0.2, max_tokens: 2048 }
       },
       {
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`
+        },
         timeout: 60000
       }
     );
@@ -223,12 +281,10 @@ async function setPRStatus(githubToken, isPassed, summary) {
   const octokit = github.getOctokit(githubToken);
   const context = github.context;
 
-  // 仅PR事件设置状态
   if (!context.payload.pull_request) return;
 
   const state = isPassed ? 'success' : 'failure';
   const description = isPassed ? '代码评审通过' : '代码评审存在问题，需优化';
-  const targetUrl = context.payload.pull_request.html_url;
 
   try {
     await octokit.rest.repos.createCommitStatus({
@@ -238,7 +294,7 @@ async function setPRStatus(githubToken, isPassed, summary) {
       state: state,
       context: '千问代码评审',
       description: description,
-      target_url: targetUrl
+      target_url: context.payload.pull_request.html_url
     });
     core.info(`PR状态已设置为：${state}（${description}）`);
   } catch (error) {
@@ -246,7 +302,7 @@ async function setPRStatus(githubToken, isPassed, summary) {
   }
 }
 
-// 调用千问API获取代码评审意见（按文件处理）
+// 调用千问API获取代码评审意见（主函数）
 async function getQianwenReview(fileDiffs, apiKey, model = 'qwen-turbo', ignoreComment = 'IGNORE') {
   if (!fileDiffs || Object.keys(fileDiffs).length === 0) {
     const result = '所有变更文件均为忽略目录/包含忽略标记的文件，代码评审通过';
@@ -255,25 +311,33 @@ async function getQianwenReview(fileDiffs, apiKey, model = 'qwen-turbo', ignoreC
   }
 
   const fileNames = Object.keys(fileDiffs);
-  core.info(`共需评审 ${fileNames.length} 个文件，开始异步评审...`);
+  const totalFiles = fileNames.length;
+  core.info(`共需评审 ${totalFiles} 个文件，开始分批异步评审...`);
 
-  // 异步评审所有文件
-  const reviewPromises = fileNames.map(fileName =>
-    reviewFile(fileName, fileDiffs[fileName], apiKey, model)
+  // 生成评审操作列表
+  const reviewOperations = fileNames.map(fileName =>
+    () => reviewFile(fileName, fileDiffs[fileName], apiKey, model)
   );
-  const fileReviews = await Promise.all(reviewPromises);
+
+  // 读取用户配置的批次大小和重试次数
+  const batchSize = Math.min(Math.max(parseInt(core.getInput('batch-size')) || 3, 1), 10);
+  const maxRetries = Math.min(Math.max(parseInt(core.getInput('max-retries')) || 3, 1), 5);
+  core.info(`使用参数：每批 ${batchSize} 个文件，最多重试 ${maxRetries} 次`);
+
+  // 分批评审
+  const fileReviews = await batchPromise(reviewOperations, batchSize, maxRetries);
 
   // 生成全局总结
   const globalSummary = await getGlobalSummary(fileReviews, apiKey, model);
 
-  // 判断是否通过
+  // 判断是否通过并设置PR状态
   const isPassed = globalSummary.includes('评审结论：通过');
   await setPRStatus(core.getInput('github-token'), isPassed, globalSummary);
 
   // 构建最终结果
   const finalResult = `
 ## 代码评审完整结果
-### 文件评审明细（共${fileNames.length}个文件）：
+### 文件评审明细（共${totalFiles}个文件）：
 ${fileReviews.map(r => `\n#### ${r.fileName}\n${r.review}`).join('\n')}
 
 ---
