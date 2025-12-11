@@ -1,5 +1,5 @@
 const core = require('@actions/core');
-const { getQianwenReview, submitReviewToGitHub, getCodeDiff, getFileContents } = require('./utils');
+const { getQianwenReview, submitReviewToGitHub, getCodeDiff } = require('./utils');
 
 async function run() {
     try {
@@ -10,31 +10,26 @@ async function run() {
         const reviewCommentTitle = core.getInput('review-comment-title');
         const ignoreComment = core.getInput('ignore-comment');
 
-        // 2. 获取代码Diff
+        // 2. 获取代码Diff（按文件分割）
         core.info('正在获取代码Diff...');
-        const codeDiff = await getCodeDiff(githubToken);
-        if (!codeDiff || codeDiff.length === 0) {
-            core.info('未检测到代码Diff，跳过评审');
+        const fileDiffs = await getCodeDiff(githubToken);
+        if (!fileDiffs || Object.keys(fileDiffs).length === 0) {
+            core.info('未检测到需评审的代码Diff，跳过评审');
             return;
         }
-        core.info(`获取到Diff长度: ${codeDiff.length} 字符`);
+        core.info(`获取到 ${Object.keys(fileDiffs).length} 个文件的Diff`);
 
-        // 3. 获取相关文件完整内容作为上下文
-        core.info('正在获取相关文件内容作为上下文...');
-        const fileContents = await getFileContents(githubToken, codeDiff);
-
-        // 4. 调用千问API进行代码评审
+        // 3. 调用千问API进行代码评审
         core.info('正在调用千问API进行代码评审...');
         const reviewContent = await getQianwenReview(
-            codeDiff,
+            fileDiffs,
             qianwenApiKey,
             qianwenModel,
-            fileContents,
             ignoreComment
         );
         core.info('千问评审完成，结果：\n' + reviewContent);
 
-        // 5. 提交评审结果到GitHub
+        // 4. 提交评审结果到GitHub
         core.info('正在提交评审结果到GitHub...');
         await submitReviewToGitHub(reviewContent, githubToken, reviewCommentTitle);
 
