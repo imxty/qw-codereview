@@ -53,7 +53,6 @@ function filterIgnoredFilesFromDiff(diffContent, ignoreComment = 'IGNORE') {
   for (const line of diffLines) {
     const fileHeaderMatch = line.match(/^diff --git a\/(.+?) b\/(.+?)$/);
     if (fileHeaderMatch) {
-      // 处理上一个文件的Diff
       if (currentFileDiff.length > 0) {
         const prevFileDiff = currentFileDiff.join('\n');
         if (!skipCurrentFile) {
@@ -65,7 +64,6 @@ function filterIgnoredFilesFromDiff(diffContent, ignoreComment = 'IGNORE') {
         currentFileDiff = [];
       }
 
-      // 检查新文件是否在忽略目录
       const filePath = fileHeaderMatch[1] || fileHeaderMatch[2];
       skipCurrentFile = isFileIgnored(filePath);
       currentFileDiff.push(line);
@@ -77,7 +75,6 @@ function filterIgnoredFilesFromDiff(diffContent, ignoreComment = 'IGNORE') {
     }
   }
 
-  // 处理最后一个文件的Diff
   if (currentFileDiff.length > 0) {
     const lastFileDiff = currentFileDiff.join('\n');
     if (!skipCurrentFile) {
@@ -124,6 +121,12 @@ async function getFileContents(githubToken, diff) {
   const limitedFiles = files.slice(0, 20);
   core.info(`将获取 ${limitedFiles.length} 个非忽略文件的完整内容作为上下文`);
 
+  let targetRef = context.sha;
+  if (context.payload.pull_request) {
+    targetRef = context.payload.pull_request.head.sha;
+    core.info(`PR事件，使用PR头部分支SHA: ${targetRef} 来获取文件内容`);
+  }
+
   for (const file of limitedFiles) {
     if (isFileIgnored(file)) {
       core.debug(`跳过忽略文件的内容获取：${file}`);
@@ -134,14 +137,14 @@ async function getFileContents(githubToken, diff) {
         owner: context.repo.owner,
         repo: context.repo.repo,
         path: file,
-        ref: context.sha || context.payload.pull_request?.head?.sha
+        ref: targetRef
       });
 
       if (data.content) {
         fileContents[file] = Buffer.from(data.content, 'base64').toString('utf8');
       }
     } catch (error) {
-      core.warning(`无法获取文件内容 ${file}: ${error.message}`);
+      core.warning(`无法获取文件 ${file} 内容（新增文件/分支不存在）：${error.message}`);
     }
   }
 
@@ -225,29 +228,9 @@ async function getCodeDiff(githubToken) {
   }
 }
 
-// 调用千问API获取代码评审意见（移除全局跳过逻辑）
-async function getQianwenReview(codeDiff, apiKey, model = 'qwen-turbo', fileContents = {}, ignoreComment = 'IGNORE') {
-  if (!codeDiff || codeDiff.trim() === '') {
-    return '所有变更文件均为忽略目录/包含忽略标记的文件，代码评审通过';
-  }
-
-  const maxDiffLength = 20000;
-  const truncatedDiff = codeDiff.length > maxDiffLength
-    ? codeDiff.substring(0, maxDiffLength) + '\n...（Diff内容过长已截断）'
-    : codeDiff;
-
-  let contextInfo = '';
-  if (Object.keys(fileContents).length > 0) {
-    contextInfo = '相关文件完整内容（用于上下文理解）：\n';
-    for (const [file, content] of Object.entries(fileContents)) {
-      const truncatedContent = content.length > 3000
-        ? content.substring(0, 3000) + '...（内容过长已截断）'
-        : content;
-      contextInfo += `\n===== ${file} =====\n${truncatedContent}\n`;
-    }
-  }
-
-  const prompt = `
+// 调用千问API获取分片评审结果
+async function getChunkReview(chunk, chunkIndex, totalChunks, fileContents, apiKey, model) {
+  const chunkPrompt = `
     你是一位资深的代码评审专家，请严格按照以下规则评审代码：
     1. 重点检查：
        - 拼写错误（变量名、函数名、注释中的文字）
@@ -257,14 +240,16 @@ async function getQianwenReview(codeDiff, apiKey, model = 'qwen-turbo', fileCont
     2. 给出具体的修复建议和优化方案，包括修改示例
     3. 语言简洁、专业，优先使用中文
     4. 结合提供的完整文件上下文理解代码意图
-    5. 如果代码无问题，回复"代码评审通过，未发现明显问题"
+    5. 如果代码无问题，回复"该分片代码评审通过，未发现明显问题"
     6. 评审时需要指出具体位置（行号或代码片段）
 
-    ${contextInfo ? contextInfo : '无额外上下文信息'}
+    ${Object.keys(fileContents).length > 0 ? `相关文件完整内容：\n${JSON.stringify(fileContents, null, 2)}` : '无额外上下文信息'}
 
+    【当前评审分片 ${chunkIndex + 1}/${totalChunks}】
     代码Diff内容：
-    ${truncatedDiff}
-  `;
+    ${chunk}
+    ${chunkIndex < totalChunks - 1 ? '\n注意：这是长Diff的其中一个分片，请仅评审当前分片内容，无需关联其他分片' : ''}
+    `.trim();
 
   try {
     const response = await axios.post(
@@ -275,7 +260,7 @@ async function getQianwenReview(codeDiff, apiKey, model = 'qwen-turbo', fileCont
           messages: [
             {
               role: 'user',
-              content: prompt.trim()
+              content: chunkPrompt
             }
           ]
         },
@@ -295,15 +280,142 @@ async function getQianwenReview(codeDiff, apiKey, model = 'qwen-turbo', fileCont
       }
     );
 
-    if (response.data.output?.text) {
-      return response.data.output.text.trim();
-    } else {
-      throw new Error('千问API返回无有效内容');
-    }
+    return response.data.output?.text ? response.data.output.text.trim() : '获取评审意见失败';
   } catch (error) {
-    core.error(`千问API调用失败: ${error.message}`);
-    throw new Error(`Qianwen API Error: ${error.message}`);
+    core.error(`千问API分片 ${chunkIndex + 1} 调用失败: ${error.message}`);
+    return `调用失败：${error.message}`;
   }
+}
+
+// 调用千问API生成全局总结
+async function getGlobalSummary(reviewChunks, apiKey, model) {
+  const summaryPrompt = `
+    你是一位资深的代码评审专家，请基于以下多个分片的代码评审结果，生成一份**全局、简洁、重点突出**的评审总结：
+    1. 汇总所有分片的问题（去重、合并同类问题）
+    2. 给出整体的修复建议和优化方向
+    3. 明确判断代码是否"通过评审"（仅当所有分片均无问题时才判定为通过）
+    4. 语言简洁、专业，优先使用中文
+    5. 格式要求：先写"评审结论"（通过/不通过），再写"核心问题汇总"，最后写"整体优化建议"
+
+    分片评审结果列表：
+    ${reviewChunks.map((chunk, idx) => `### 分片 ${idx + 1} 评审结果\n${chunk}`).join('\n\n')}
+    `.trim();
+
+  try {
+    const response = await axios.post(
+      'https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation',
+      {
+        model: model,
+        input: {
+          messages: [
+            {
+              role: 'user',
+              content: summaryPrompt
+            }
+          ]
+        },
+        parameters: {
+          result_format: 'text',
+          temperature: 0.2,
+          top_p: 0.8,
+          max_tokens: 2048
+        }
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`
+        },
+        timeout: 60000
+      }
+    );
+
+    return response.data.output?.text ? response.data.output.text.trim() : '生成全局总结失败';
+  } catch (error) {
+    core.error(`千问API全局总结调用失败: ${error.message}`);
+    return `全局总结生成失败：${error.message}`;
+  }
+}
+
+// 设置PR状态（通过/不通过）
+async function setPRStatus(githubToken, isPassed, summary) {
+  const octokit = github.getOctokit(githubToken);
+  const context = github.context;
+
+  // 仅PR事件设置状态
+  if (!context.payload.pull_request) return;
+
+  const state = isPassed ? 'success' : 'failure';
+  const description = isPassed ? '代码评审通过' : '代码评审存在问题，需优化';
+  const targetUrl = context.payload.pull_request.html_url;
+
+  try {
+    await octokit.rest.repos.createCommitStatus({
+      owner: context.repo.owner,
+      repo: context.repo.repo,
+      sha: context.payload.pull_request.head.sha,
+      state: state,
+      context: '千问代码评审',
+      description: description,
+      target_url: targetUrl
+    });
+    core.info(`PR状态已设置为：${state}（${description}）`);
+  } catch (error) {
+    core.error(`设置PR状态失败: ${error.message}`);
+  }
+}
+
+// 调用千问API获取代码评审意见（支持长Diff分片 + AI全局总结 + PR状态设置）
+async function getQianwenReview(codeDiff, apiKey, model = 'qwen-turbo', fileContents = {}, ignoreComment = 'IGNORE') {
+  if (!codeDiff || codeDiff.trim() === '') {
+    const result = '所有变更文件均为忽略目录/包含忽略标记的文件，代码评审通过';
+    await setPRStatus(core.getInput('github-token'), true, result);
+    return result;
+  }
+
+  // 分片配置
+  const chunkSize = 20000;
+  const diffChunks = [];
+  for (let i = 0; i < codeDiff.length; i += chunkSize) {
+    diffChunks.push(codeDiff.substring(i, i + chunkSize));
+  }
+
+  core.info(`Diff总长度 ${codeDiff.length} 字符，拆分为 ${diffChunks.length} 片，每片最大 ${chunkSize} 字符`);
+
+  // 分片调用AI评审
+  const reviewChunks = [];
+  for (let i = 0; i < diffChunks.length; i++) {
+    const chunkReview = await getChunkReview(diffChunks[i], i, diffChunks.length, fileContents, apiKey, model);
+    reviewChunks.push(chunkReview);
+
+    // 分片间隔避免限流
+    if (i < diffChunks.length - 1) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+  }
+
+  // AI生成全局总结
+  const globalSummary = await getGlobalSummary(reviewChunks, apiKey, model);
+  core.info(`全局评审总结：${globalSummary}`);
+
+  // 判断是否通过评审（全局总结中包含"评审结论：通过"才判定为通过）
+  const isPassed = globalSummary.includes('评审结论：通过');
+
+  // 设置PR状态（核心：有问题则置为failure，PR无法合并）
+  await setPRStatus(core.getInput('github-token'), isPassed, globalSummary);
+
+  // 最终返回结果（分片结果 + 全局总结）
+  const finalResult = `
+## 代码评审完整结果
+### 分片评审明细（共${diffChunks.length}片）：
+${reviewChunks.map((chunk, idx) => `\n#### 分片 ${idx + 1}\n${chunk}`).join('\n')}
+
+---
+### 全局评审总结
+${globalSummary}
+    `.trim();
+
+  return finalResult;
 }
 
 // 提交评审意见到GitHub PR/Commit
