@@ -33392,7 +33392,9 @@ function getFileDiffs(diffContent, ignoreComment = 'IGNORE') {
 
       // 初始化新文件
       currentFile = fileHeaderMatch[1] || fileHeaderMatch[2];
-      skipCurrentFile = isFileIgnored(currentFile);
+      // 检查是否为新增文件（a/路径为/dev/null表示新增）
+      const isAddedFile = fileHeaderMatch[1] === '/dev/null';
+      skipCurrentFile = isFileIgnored(currentFile) || !isAddedFile;
       currentLines = [line];
       continue;
     }
@@ -33415,8 +33417,37 @@ function getFileDiffs(diffContent, ignoreComment = 'IGNORE') {
     }
   }
 
-  core.info(`解析出 ${Object.keys(fileDiffs).length} 个需评审的文件`);
+  core.info(`解析出 ${Object.keys(fileDiffs).length} 个需评审的新增文件`);
   return fileDiffs;
+}
+
+// 获取所有PR文件（支持分页获取全部文件）
+async function getAllPRFiles(octokit, owner, repo, pullNumber) {
+  const allFiles = [];
+  let page = 1;
+  const perPage = 100;
+
+  while (true) {
+    core.info(`获取文件列表第 ${page} 页...`);
+    const { data: files } = await octokit.rest.pulls.listFiles({
+      owner,
+      repo,
+      pull_number: pullNumber,
+      per_page: perPage,
+      page
+    });
+
+    if (files.length === 0) break; // 没有更多文件时退出循环
+    allFiles.push(...files);
+    page++;
+
+    // 避免API请求过于频繁
+    if (files.length === perPage) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+  }
+
+  return allFiles;
 }
 
 // 获取代码Diff（按文件分割）
@@ -33446,23 +33477,20 @@ async function getCodeDiff(githubToken) {
     return getFileDiffs(diffData, ignoreComment);
   } catch (error) {
     if (error.message.includes('too_large') || error.message.includes('maximum number of files')) {
-      core.warning('PR文件数量超限，将逐个获取非忽略文件的修改代码');
+      core.warning('PR文件数量超限，将逐个获取非忽略的新增文件的修改代码');
 
-      const { data: files } = await octokit.rest.pulls.listFiles({
-        owner,
-        repo,
-        pull_number: pullNumber,
-        per_page: 100
-      });
+      // 获取所有文件（分页处理）
+      const allFiles = await getAllPRFiles(octokit, owner, repo, pullNumber);
 
-      const nonIgnoredFiles = files.filter(file => !isFileIgnored(file.filename));
-      core.info(`PR中共变更 ${files.length} 个文件，过滤忽略目录后剩余 ${nonIgnoredFiles.length} 个文件`);
+      // 仅保留新增文件（status为added）且不在忽略目录中
+      const nonIgnoredFiles = allFiles.filter(file =>
+        file.status === 'added' && !isFileIgnored(file.filename)
+      );
 
-      const limitedFiles = nonIgnoredFiles.slice(0, 50); // 限制最大处理文件数
-      core.info(`将处理前 ${limitedFiles.length} 个非忽略目录文件`);
+      core.info(`PR中共变更 ${allFiles.length} 个文件，过滤后剩余 ${nonIgnoredFiles.length} 个新增文件需处理`);
 
       const fileDiffs = {};
-      for (const file of limitedFiles) {
+      for (const file of nonIgnoredFiles) {
         if (file.patch) {
           const patchLines = file.patch.split('\n');
           const modifiedLines = patchLines.filter(line =>
@@ -33548,7 +33576,7 @@ async function reviewFile(fileName, fileDiff, apiKey, model) {
       - 所有逻辑相关：条件判断、循环逻辑、函数实现等。
       - 所有格式相关：缩进、换行、空格等。
     4. 输出铁律：
-      - 只输出符合第2点的问题，其他任何内容（包括“可能有问题”的猜测）都绝对不能出现，一定要100%确定有问题再提出。
+      - 只输出符合第2点的问题，一定要100%确定有问题再提出，其他任何内容（包括“可能有问题”的猜测）都绝对不能出现。
       - 每条问题用"•"开头，中文表述，不超过20字。
       - 无符合条件的问题时，仅回复“该文件修改无明显问题”。
 
@@ -33658,7 +33686,7 @@ async function getQianwenReview(fileDiffs, apiKey, model = 'qwen-turbo', ignoreC
 
   const fileNames = Object.keys(fileDiffs);
   const totalFiles = fileNames.length;
-  core.info(`共需评审 ${totalFiles} 个文件，开始分批异步评审...`);
+  core.info(`共需评审 ${totalFiles} 个新增文件，开始分批异步评审...`);
 
   // 生成评审操作列表
   const reviewOperations = fileNames.map(fileName =>
@@ -33683,7 +33711,7 @@ async function getQianwenReview(fileDiffs, apiKey, model = 'qwen-turbo', ignoreC
   // 构建最终结果
   const finalResult = `
 ## 代码评审完整结果
-### 文件评审明细（共${totalFiles}个文件）：
+### 文件评审明细（共${totalFiles}个新增文件）：
 ${fileReviews.map(r => `\n#### ${r.fileName}\n${r.review}`).join('\n')}
 
 ---
@@ -33717,7 +33745,6 @@ module.exports = {
   submitReviewToGitHub,
   getCodeDiff
 };
-
 
 /***/ }),
 
