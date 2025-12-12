@@ -33719,9 +33719,12 @@ async function getQianwenReview(fileDiffs, apiKey, model = 'qwen-turbo', ignoreC
 
   // 构建最终结果
   const finalResult = `
-## 代码评审完整结果
-### 文件评审明细（共${totalFiles}个新增文件）：
-${fileReviews.map(r => `\n#### ${r.fileName}\n${r.review}`).join('\n')}
+## 代码评审结果
+### 文件评审明细（共${totalFiles}个文件）：
+${fileReviews
+      .filter(r => r.review !== '该文件修改无明显问题') // 过滤无问题的文件
+      .map(r => `\n#### ${r.fileName}\n${r.review}`)
+      .join('\n') || '所有文件均无明显问题'}
 
 ---
 ### 全局评审总结
@@ -33735,18 +33738,45 @@ ${globalSummary}
 async function submitReviewToGitHub(reviewContent, githubToken, commentTitle) {
   const octokit = github.getOctokit(githubToken);
   const context = github.context;
+  const MAX_COMMENT_LENGTH = 65536; // GitHub评论最大长度限制
 
-  if (context.payload.pull_request) {
-    await octokit.rest.issues.createComment({
-      owner: context.repo.owner,
-      repo: context.repo.repo,
-      issue_number: context.payload.pull_request.number,
-      body: `### ${commentTitle}\n\n${reviewContent}`
-    });
-    core.info(`评审意见已提交到PR #${context.payload.pull_request.number}`);
-  } else {
-    throw new Error('不支持的事件类型，仅支持PR事件');
+  const issueNumber = context.payload.pull_request.number;
+  const owner = context.repo.owner;
+  const repo = context.repo.repo;
+
+  // 拆分内容为多个块
+  const chunks = [];
+  let currentPosition = 0;
+
+  while (currentPosition < reviewContent.length) {
+    // 计算当前块的结束位置（预留标题和分隔符的空间）
+    const remainingLength = reviewContent.length - currentPosition;
+    const chunkLength = Math.min(remainingLength, MAX_COMMENT_LENGTH - 100); // 预留100字符给标题等
+    chunks.push(reviewContent.substring(currentPosition, currentPosition + chunkLength));
+    currentPosition += chunkLength;
   }
+
+  // 提交第一个块（带完整标题）
+  await octokit.rest.issues.createComment({
+    owner,
+    repo,
+    issue_number: issueNumber,
+    body: `### ${commentTitle}\n\n${chunks[0]}`
+  });
+
+  // 提交剩余块（带续篇标记）
+  for (let i = 1; i < chunks.length; i++) {
+    await octokit.rest.issues.createComment({
+      owner,
+      repo,
+      issue_number: issueNumber,
+      body: `### ${commentTitle}（续${i}/${chunks.length - 1}）\n\n${chunks[i]}`
+    });
+    // 避免API请求过于频繁
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+
+  core.info(`评审意见已分${chunks.length}部分提交到PR #${issueNumber}`);
 }
 
 module.exports = {
