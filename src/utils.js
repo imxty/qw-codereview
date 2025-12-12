@@ -132,6 +132,10 @@ async function getCodeDiff(githubToken) {
   const owner = context.repo.owner;
   const repo = context.repo.repo;
 
+  // curl -L \
+  // -H "Accept: application/vnd.github.v3.diff" \
+  // -H "Authorization: token xxxx" \
+  // "https://api.github.com/repos/xx/xxxx/pulls/21"
   try {
     core.info('尝试获取PR完整Diff...');
     const { data: diffData } = await octokit.rest.pulls.get({
@@ -230,6 +234,7 @@ async function retryOperation(operation, maxRetries, baseDelay = 2000) {
 
 // 按文件进行AI评审
 async function reviewFile(fileName, fileDiff, apiKey, model) {
+  core.info(`传给ai的内容 ${fileDiff}`);
   const prompt = `
     你是一位严格执行指令的代码评审专家，必须100%遵循以下规则：
     1. 仅处理新增/修改的代码片段，不扩展到其他内容。
