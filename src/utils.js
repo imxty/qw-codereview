@@ -7,7 +7,8 @@ const BASE_IGNORED_DIRS = [
   'bin/', 'build/', 'dist/', 'conf/', 'vendor/', 'node_modules/', 'tmp/',
   'logs/', 'cache/', 'coverage/', 'public/', 'assets/', 'static/', 'lib/', 'libs/',
   'target/', 'out/', 'output/', 'temp/', '.git/', '.svn/', '.hg/', '.idea/', '.vscode/',
-  'bower_components/', 'jspm_packages/', 'typings/'
+  'bower_components/', 'jspm_packages/', 'typings/', 'npm-debug.log/', 'yarn-error.log/',
+  'pnpm-lock.yaml/', 'package-lock.json/', 'yarn.lock/', 'composer.lock/'
 ];
 
 // 新增基础忽略文件后缀（内置通用规则）
@@ -20,7 +21,7 @@ const BASE_IGNORED_EXTENSIONS = [
   // 音频（可选补充）
   '.mp3', '.wav', '.flac', '.aac', '.ogg',
   // 文本/文档
-  '.txt', '.md', '.doc', '.docx', '.pdf', '.xls', '.xlsx', '.ppt', '.pptx', '.csv',
+  '.txt', '.md', '.doc', '.docx', '.pdf', '.xls', '.xlsx', '.ppt', '.pptx', '.csv', '.lock',
   // 配置文件
   '.json', '.yml', '.yaml', '.ini', '.conf', '.toml', '.xml', '.properties',
   // 压缩包（可选补充）
