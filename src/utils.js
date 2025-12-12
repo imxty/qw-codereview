@@ -7,10 +7,39 @@ const BASE_IGNORED_DIRS = [
   'bin/', 'build/', 'dist/', 'conf/', 'vendor/', 'node_modules/', 'tmp/',
   'logs/', 'cache/', 'coverage/', 'public/', 'assets/', 'static/', 'lib/', 'libs/',
   'target/', 'out/', 'output/', 'temp/', '.git/', '.svn/', '.hg/', '.idea/', '.vscode/',
-  'bower_components/', 'jspm_packages/', 'typings/', 'npm-debug.log/', 'yarn-error.log/',
-  'pnpm-lock.yaml/', 'package-lock.json/', 'yarn.lock/', 'composer.lock/'
+  'bower_components/', 'jspm_packages/', 'typings/'
 ];
 
+// 新增基础忽略文件后缀（内置通用规则）
+// 按类型分类的基础忽略后缀（可按需增删）
+const BASE_IGNORED_EXTENSIONS = [
+  // 图片
+  '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.svg', '.ico', '.webp', '.tiff',
+  // 视频
+  '.mp4', '.avi', '.mov', '.wmv', '.flv', '.mkv', '.webm', '.mpeg', '.mpg', '.m4v',
+  // 音频（可选补充）
+  '.mp3', '.wav', '.flac', '.aac', '.ogg',
+  // 文本/文档
+  '.txt', '.md', '.doc', '.docx', '.pdf', '.xls', '.xlsx', '.ppt', '.pptx', '.csv',
+  // 配置文件
+  '.json', '.yml', '.yaml', '.ini', '.conf', '.toml', '.xml', '.properties',
+  // 压缩包（可选补充）
+  '.zip', '.rar', '.7z', '.tar', '.gz', '.bz2',
+  // 日志文件（核心新增）
+  '.log', '.logs', '.txt.log', '.debug', '.error', '.warn',
+  // 临时文件（补充）
+  '.tmp', '.temp', '.bak', '.swp', '.swo'
+];
+
+// 合并基础忽略后缀 + 自定义忽略后缀
+function getCombinedIgnoredExtensions() {
+  const customIgnoredExtsStr = core.getInput('ignored-extensions') || '';
+  const customIgnoredExts = customIgnoredExtsStr.split(',')
+    .map(ext => ext.trim())
+    .filter(ext => ext)
+    .map(ext => ext.startsWith('.') ? ext : `.${ext}`); // 统一添加前缀点
+  return [...new Set([...BASE_IGNORED_EXTENSIONS, ...customIgnoredExts])];
+}
 // 合并基础忽略目录 + 自定义忽略目录
 function getCombinedIgnoredDirs() {
   const customIgnoredDirsStr = core.getInput('ignored-dirs') || '';
@@ -21,14 +50,23 @@ function getCombinedIgnoredDirs() {
   return [...new Set([...BASE_IGNORED_DIRS, ...customIgnoredDirs])];
 }
 
-// 判断文件是否在忽略目录中
 function isFileIgnored(filePath) {
   const IGNORED_DIRS = getCombinedIgnoredDirs();
+  const IGNORED_EXTS = getCombinedIgnoredExtensions();
   const lowerFilePath = filePath.toLowerCase();
-  return IGNORED_DIRS.some(ignoredDir => {
+
+  // 目录忽略判断（原有逻辑）
+  const isDirIgnored = IGNORED_DIRS.some(ignoredDir => {
     const lowerIgnoredDir = ignoredDir.toLowerCase();
     return lowerFilePath.startsWith(lowerIgnoredDir) || lowerFilePath === lowerIgnoredDir.replace('/', '');
   });
+
+  // 新增后缀忽略判断
+  const isExtIgnored = IGNORED_EXTS.some(ext => {
+    return lowerFilePath.endsWith(ext.toLowerCase());
+  });
+
+  return isDirIgnored || isExtIgnored;
 }
 
 // 解析Diff获取每个文件的修改内容（仅保留新增行）
