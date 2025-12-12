@@ -33596,27 +33596,36 @@ async function reviewFile(fileName, fileDiff, apiKey, model) {
 
   try {
     const response = await axios.post(
-      'https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation',
+      // OpenAI 官方接口地址（也可替换为自建代理/兼容服务地址）
+      'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
       {
-        model: model,
-        input: { messages: [{ role: 'user', content: prompt }] },
-        parameters: { result_format: 'text', temperature: 0.2, max_tokens: 2048 }
+        model: model, // 如 "gpt-3.5-turbo"、"gpt-4" 等 OpenAI 模型名
+        messages: [{ role: 'user', content: prompt }], // 移除阿里云的 input 包裹层
+        temperature: 0.2, // 直接平铺参数（OpenAI 无 parameters 嵌套）
+        max_tokens: 2048,
+        // 移除 result_format（OpenAI 天然返回 message 格式，无需该参数）
       },
       {
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`
+          'Authorization': `Bearer ${apiKey}` // 认证方式保持一致
         },
         timeout: 60000
       }
     );
+
+    // 适配 OpenAI 响应结构（核心修改点）
     return {
       fileName,
-      review: response.data.output?.text?.trim() || '评审失败：无返回内容'
+      review: response.data.choices?.[0]?.message?.content?.trim() || '评审失败：无返回内容'
     };
   } catch (error) {
+    // 优化错误信息捕获（兼容 OpenAI 错误响应格式）
     const errorMsg = error.response
-      ? `状态码 ${error.response.status}，原因：${error.response.data?.message || '未知错误'}`
+      ? `状态码 ${error.response.status}，原因：${error.response.data?.error?.message ||
+      error.response.data?.message ||
+      '未知错误'
+      }`
       : error.message;
     throw new Error(`文件 ${fileName} 评审失败: ${errorMsg}`);
   }
@@ -33638,24 +33647,33 @@ async function getGlobalSummary(fileReviews, apiKey, model) {
 
   try {
     const response = await axios.post(
-      'https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation',
+      // 替换为 OpenAI 官方接口（或兼容的代理地址）
+      'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
       {
-        model: model,
-        input: { messages: [{ role: 'user', content: summaryPrompt }] },
-        parameters: { result_format: 'text', temperature: 0.2, max_tokens: 2048 }
+        model: model, // 对应 OpenAI 模型名（如 gpt-3.5-turbo/gpt-4）
+        messages: [{ role: 'user', content: summaryPrompt }], // 移除阿里云 input 嵌套
+        temperature: 0.2, // 平铺参数（无 parameters 层级）
+        max_tokens: 2048  // 移除 result_format（OpenAI 无需此参数）
       },
       {
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`
+          'Authorization': `Bearer ${apiKey}` // 认证方式保持一致
         },
         timeout: 60000
       }
     );
-    return response.data.output?.text?.trim() || '生成全局总结失败';
+
+    // 适配 OpenAI 响应结构（核心修改）
+    return response.data.choices?.[0]?.message?.content?.trim() || '生成全局总结失败';
   } catch (error) {
-    core.error(`全局总结生成失败: ${error.message}`);
-    return `全局总结生成失败: ${error.message}`;
+    // 优化错误信息（兼容 OpenAI 错误响应格式）
+    const errorMsg = error.response
+      ? `Request failed with status code ${error.response.status}，原因：${error.response.data?.error?.message || '未知错误'}`
+      : error.message;
+
+    core.error(`全局总结生成失败: ${errorMsg}`);
+    return `全局总结生成失败: ${errorMsg}`;
   }
 }
 
