@@ -70,7 +70,7 @@ function isFileIgnored(filePath) {
   return isDirIgnored || isExtIgnored;
 }
 
-// 解析Diff获取每个文件的修改内容（仅保留新增行）
+// 解析Diff获取每个文件的修改内容（保留完整diff格式）
 function getFileDiffs(diffContent, ignoreComment = 'IGNORE') {
   if (!diffContent) return {};
 
@@ -93,24 +93,28 @@ function getFileDiffs(diffContent, ignoreComment = 'IGNORE') {
 
       // 初始化新文件
       currentFile = fileHeaderMatch[1] || fileHeaderMatch[2];
-      // 判断文件状态（通过diff头信息推断）
-      const isRemovedFile = fileHeaderMatch[2] === '/dev/null'; // b/路径为/dev/null表示删除
+      const isRemovedFile = fileHeaderMatch[2] === '/dev/null';
       const isRenamedFile = fileHeaderMatch[1] !== fileHeaderMatch[2] &&
         !isRemovedFile &&
-        fileHeaderMatch[1] !== '/dev/null'; // 路径不同且非新增/删除表示重命名
-      // 仅跳过删除和重命名的文件，其他状态（新增/修改等）都保留
+        fileHeaderMatch[1] !== '/dev/null';
       skipCurrentFile = isFileIgnored(currentFile) || isRemovedFile || isRenamedFile;
       currentLines = [line];
       continue;
     }
 
     if (currentFile && !skipCurrentFile) {
-      // 仅保留新增行和文件元信息
-      if (line.startsWith('+') || line.startsWith('diff --git') ||
-        line.startsWith('index ') || line.startsWith('---') || line.startsWith('+++')) {
-        const cleanLine = line.startsWith('+') && !line.startsWith('+++') ? line.substring(1) : line;
-        currentLines.push(cleanLine);
+      // 保留完整diff格式：+/- 行、上下文行、hunk头、文件元信息
+      if (line.startsWith('@@') ||
+          line.startsWith('diff --git') ||
+          line.startsWith('index ') ||
+          line.startsWith('---') ||
+          line.startsWith('+++') ||
+          line.startsWith('+') ||
+          line.startsWith('-') ||
+          line.startsWith(' ')) {
+        currentLines.push(line);
       }
+      // 跳过其他行（如 \ No newline at end of file 等）
     }
   }
 
@@ -122,7 +126,7 @@ function getFileDiffs(diffContent, ignoreComment = 'IGNORE') {
     }
   }
 
-  core.info(`解析出 ${Object.keys(fileDiffs).length} 个需评审的新增文件`);
+  core.info(`解析出 ${Object.keys(fileDiffs).length} 个需评审的文件`);
   return fileDiffs;
 }
 
@@ -201,13 +205,8 @@ async function getCodeDiff(githubToken) {
       const fileDiffs = {};
       for (const file of nonIgnoredFiles) {
         if (file.patch) {
-          const patchLines = file.patch.split('\n');
-          const modifiedLines = patchLines.filter(line =>
-            line.startsWith('+') || line.startsWith('diff --git') ||
-            line.startsWith('index ') || line.startsWith('---') || line.startsWith('+++')
-          ).map(line => line.startsWith('+') && !line.startsWith('+++') ? line.substring(1) : line);
-
-          const fileDiff = `diff --git a/${file.filename} b/${file.filename}\n${modifiedLines.join('\n')}`;
+          // 保留完整 patch 格式（包含 +/- 行和上下文行）
+          const fileDiff = `diff --git a/${file.filename} b/${file.filename}\n${file.patch}`;
           if (!fileDiff.includes(ignoreComment)) {
             fileDiffs[file.filename] = fileDiff;
           }
@@ -271,29 +270,71 @@ async function retryOperation(operation, maxRetries, baseDelay = 2000) {
   }
 }
 
+// 过滤无意义的评审建议
+function filterTrivialSuggestions(review) {
+  if (review.trim() === 'LGTM' || review.trim() === '该文件修改无明显问题') {
+    return 'LGTM';
+  }
+
+  const lines = review.split('\n');
+  const filtered = lines.filter(line => {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('•')) return true; // 非问题行保留
+
+    // 提取建议中的 "A→B" 或 "A改成B" 格式，检查是否是同一内容
+    const arrowMatch = trimmed.match(/["'](\S+)["']?\s*[→>改]\s*["']?(\S+)/);
+    if (arrowMatch && arrowMatch[1].toLowerCase() === arrowMatch[2].toLowerCase()) {
+      return false; // 过滤 "error→error" 类无意义建议
+    }
+
+    // 过滤建议内容和原内容完全相同的行（如 "• xxx: 建议将 xxx 改为 xxx"）
+    const changeMatch = trimmed.match(/建议将\s*["']?(\S+?)["']?\s*改为\s*["']?(\S+?)["']?\s*$/);
+    if (changeMatch && changeMatch[1].toLowerCase() === changeMatch[2].toLowerCase()) {
+      return false;
+    }
+
+    return true;
+  });
+
+  const result = filtered.join('\n').trim();
+  // 如果过滤后没有实质性问题了，返回 LGTM
+  const hasIssues = filtered.some(line => line.trim().startsWith('•'));
+  return hasIssues ? result : 'LGTM';
+}
+
 // 按文件进行AI评审
 async function reviewFile(fileName, fileDiff, apiKey, model) {
-  // core.info(`传给ai的内容 ${fileDiff}`);
-  const prompt = `
-    你是一位代码评审专家，必须100%遵循以下规则：
-    1. 仅处理代码变量拼写命名问题，不扩展到其他内容，一定要100%确定有问题再提出，其他任何内容（包括“可能有问题”的猜测）都绝对不能出现。
-    2. 【唯一检查目标】：
-      - 纯拼写错误：变量名、函数名中存在的字母拼写错误（如把"data"写成"datatype"这种明确的拼写失误）。
-      - 命名可读性问题：名称含义完全无法理解，如果只是可读性差一点可以不用管（比如'buzuzzz'这种完全不知道含义的变量)。
-    3. 【绝对禁止检查/输出任何以下内容】：
-      - 所有语法相关：括号缺失、标签未闭合、变量未定义、函数未声明等。
-      - 所有引用相关：变量未使用、导入未使用、常量未引用等。
-      - 所有逻辑相关：条件判断、循环逻辑、函数实现等。
-      - 所有格式相关：缩进、换行、空格等。
-    4. 输出铁律：
-      - 输出一定要精简
-      - 每条问题用"•"开头，中文表述，不超过20字。
-      - 无符合条件的问题时，仅回复“该文件修改无明显问题”。
+  // 限制单文件diff大小，避免超出API token限制
+  const MAX_DIFF_LENGTH = 15000;
+  if (fileDiff.length > MAX_DIFF_LENGTH) {
+    core.warning(`文件 ${fileName} diff 过长(${fileDiff.length}字符)，截断至${MAX_DIFF_LENGTH}字符`);
+    fileDiff = fileDiff.substring(0, MAX_DIFF_LENGTH) + '\n... (diff已截断)';
+  }
 
-    【文件路径】${fileName}
-    【修改内容】
-    ${fileDiff}
-  `.trim();
+  const prompt = `你是一位资深代码评审专家。请审查以下代码 diff，仅针对标记为 “+” 的新增/修改行提出确定存在的问题。
+
+【评审范围】仅检查以下确定无疑的问题：
+1. Bug：空指针、数组越界、除零、死循环、条件判断错误、类型错误等
+2. 安全：SQL注入、XSS、命令注入、硬编码密钥/密码、敏感信息泄露等
+3. 资源泄漏：未关闭的连接/流/文件句柄等
+4. 并发问题：竞态条件、死锁等
+
+【严格禁止】
+- 不允许对 “-” 删除行或无前缀的上下文行提意见
+- 不允许提出”可能”、”建议”、”可以考虑”等不确定的意见
+- 不允许提出代码风格、格式、命名建议（除非有明确的拼写错误如 “recieve”→”receive”）
+- 不允许提出重命名变量、添加注释、修改缩进等建议
+- 不允许提出两段完全相同内容的修改建议（如把 error 改成 error）
+- 如果没有确定的问题，必须回复 “LGTM”，不得编造问题
+
+【文件路径】${fileName}
+【代码变更】
+${fileDiff}
+
+【输出格式】
+- 无问题：仅回复 “LGTM”
+- 有问题：每条一行，格式为 “• [有问题的代码片段]: 具体问题说明”
+- 最多列出5条最关键的问题`.trim();
 
   try {
     const response = await axios.post(
@@ -315,10 +356,11 @@ async function reviewFile(fileName, fileDiff, apiKey, model) {
       }
     );
 
-    // 适配 OpenAI 响应结构（核心修改点）
+    // 适配 OpenAI 响应结构，并过滤无意义建议
+    const rawReview = response.data.choices?.[0]?.message?.content?.trim() || '评审失败：无返回内容';
     return {
       fileName,
-      review: response.data.choices?.[0]?.message?.content?.trim() || '评审失败：无返回内容'
+      review: filterTrivialSuggestions(rawReview)
     };
   } catch (error) {
     // 优化错误信息捕获（兼容 OpenAI 错误响应格式）
@@ -335,12 +377,14 @@ async function reviewFile(fileName, fileDiff, apiKey, model) {
 // 生成全局总结
 async function getGlobalSummary(fileReviews, apiKey, model) {
   const summaryPrompt = `
-    你是一位资深代码评审专家，请基于以下各文件的评审结果，生成一份全局总结：
-    1. 汇总所有文件的问题（去重、合并同类问题）
-    2. 给出整体的修复建议和优化方向
-    3. 明确判断是否"通过评审"（仅当所有文件均无问题时才判定为通过）
-    4. 语言简洁、专业，优先使用中文
-    5. 格式要求：先写"评审结论"（通过/不通过），再写"核心问题汇总"，最后写"整体优化建议"
+    你是一位资深代码评审专家，请基于以下各文件的评审结果，生成一份简洁的全局总结。
+
+    要求：
+    1. 如果所有文件都是 "LGTM"，直接回复 "✅ 评审结论：通过，代码无问题。"
+    2. 如果有问题，汇总所有确定存在的问题，不要添加新的未提及的问题
+    3. 不要重复描述同一类问题，合并同类项
+    4. 语言简洁，每条问题不超过30字
+    5. 格式：先写"评审结论：通过/不通过"，再简要列出问题（如有）
 
     各文件评审结果：
     ${fileReviews.map(r => `【${r.fileName}】\n${r.review}`).join('\n\n')}
@@ -433,7 +477,7 @@ async function getQianwenReview(fileDiffs, apiKey, model = 'qwen-turbo', ignoreC
   const globalSummary = await getGlobalSummary(fileReviews, apiKey, model);
 
   // 判断是否通过并设置PR状态
-  const isPassed = globalSummary.includes('评审结论：通过');
+  const isPassed = globalSummary.includes('评审结论：通过') || globalSummary.includes('LGTM');
   await setPRStatus(core.getInput('github-token'), isPassed, globalSummary);
 
   // 构建最终结果
@@ -441,7 +485,7 @@ async function getQianwenReview(fileDiffs, apiKey, model = 'qwen-turbo', ignoreC
 ## 代码评审结果
 ### 文件评审明细（共${totalFiles}个文件）：
 ${fileReviews
-      .filter(r => r.review !== '该文件修改无明显问题') // 过滤无问题的文件
+      .filter(r => r.review !== 'LGTM') // 过滤无问题的文件
       .map(r => `\n#### ${r.fileName}\n${r.review}`)
       .join('\n') || '所有文件均无明显问题'}
 
