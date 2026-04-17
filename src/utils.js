@@ -314,9 +314,13 @@ async function reviewFile(fileName, fileDiff, apiKey, model) {
   const prompt = `请检查以下代码 diff 中 “+” 标记的新增行，仅找出肉眼可见的确定错误。
 
 【唯一检查项】
-1. 关键字拼写错误：如 “funtion”→”function”，”retrun”→”return”，”improt”→”import”
-2. 变量名/函数名中明确的英文拼写错误：如 “recieve”→”receive”，”defualt”→”default”
-3. 单行内一眼可见的明显代码错误：如 1/0（除零）、true=false（赋值当比较）、连续多余运算符
+1. 编程语言关键字拼写错误：如 “funtion”→”function”，”retrun”→”return”，”improt”→”import”，”calss”→”class”
+2. 单行内一眼可见的明显代码错误：如 1/0（除零）、true=false（赋值当比较）、连续多余运算符
+
+【关于拼写错误的判断】
+- 只检查编程语言的关键字（function、return、import、class、const 等），这些有唯一正确拼法
+- 禁止对变量名、函数名、参数名做拼写检查——你无法判断它们是拼写错误还是内部命名约定
+- 禁止对复合词命名做任何判断（如 ruleSet、getUser、fetchData 都是合法命名）
 
 【判断原则】
 - 只报单行内就能100%确定是错误的，不需要看上下文就能判断
