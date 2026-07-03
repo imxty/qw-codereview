@@ -2,6 +2,43 @@ const axios = require('axios');
 const core = require('@actions/core');
 const github = require('@actions/github');
 
+const GEMINI_API_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
+
+function getGeminiText(responseData) {
+  return responseData?.candidates?.[0]?.content?.parts
+    ?.map(part => part.text || '')
+    .join('')
+    .trim();
+}
+
+async function callGemini(apiKey, model, prompt) {
+  const modelName = model.replace(/^models\//, '');
+  const response = await axios.post(
+    `${GEMINI_API_BASE_URL}/models/${encodeURIComponent(modelName)}:generateContent`,
+    {
+      contents: [
+        {
+          role: 'user',
+          parts: [{ text: prompt }]
+        }
+      ],
+      generationConfig: {
+        temperature: 0.2,
+        maxOutputTokens: 2048
+      }
+    },
+    {
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': apiKey
+      },
+      timeout: 60000
+    }
+  );
+
+  return getGeminiText(response.data);
+}
+
 // 基础忽略目录列表（内置通用规则）
 const BASE_IGNORED_DIRS = [
   'bin/', 'build/', 'dist/', 'conf/', 'vendor/', 'node_modules/', 'tmp/',
@@ -344,38 +381,14 @@ ${fileDiff}
 - 最多列出5条最关键的问题`.trim();
 
   try {
-    const response = await axios.post(
-      // OpenAI 官方接口地址（也可替换为自建代理/兼容服务地址）
-      'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
-      {
-        model: model, // 如 "gpt-3.5-turbo"、"gpt-4" 等 OpenAI 模型名
-        messages: [{ role: 'user', content: prompt }], // 移除阿里云的 input 包裹层
-        temperature: 0.2, // 直接平铺参数（OpenAI 无 parameters 嵌套）
-        max_tokens: 2048,
-        // 移除 result_format（OpenAI 天然返回 message 格式，无需该参数）
-      },
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}` // 认证方式保持一致
-        },
-        timeout: 60000
-      }
-    );
-
-    // 适配 OpenAI 响应结构，并过滤无意义建议
-    const rawReview = response.data.choices?.[0]?.message?.content?.trim() || '评审失败：无返回内容';
+    const rawReview = await callGemini(apiKey, model, prompt) || '评审失败：无返回内容';
     return {
       fileName,
       review: filterTrivialSuggestions(rawReview)
     };
   } catch (error) {
-    // 优化错误信息捕获（兼容 OpenAI 错误响应格式）
     const errorMsg = error.response
-      ? `状态码 ${error.response.status}，原因：${error.response.data?.error?.message ||
-      error.response.data?.message ||
-      '未知错误'
-      }`
+      ? `状态码 ${error.response.status}，原因：${error.response.data?.error?.message || error.response.data?.message || '未知错误'}`
       : error.message;
     throw new Error(`文件 ${fileName} 评审失败: ${errorMsg}`);
   }
@@ -397,30 +410,10 @@ async function getGlobalSummary(fileReviews, apiKey, model) {
   `.trim();
 
   try {
-    const response = await axios.post(
-      // 替换为 OpenAI 官方接口（或兼容的代理地址）
-      'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
-      {
-        model: model, // 对应 OpenAI 模型名（如 gpt-3.5-turbo/gpt-4）
-        messages: [{ role: 'user', content: summaryPrompt }], // 移除阿里云 input 嵌套
-        temperature: 0.2, // 平铺参数（无 parameters 层级）
-        max_tokens: 2048  // 移除 result_format（OpenAI 无需此参数）
-      },
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}` // 认证方式保持一致
-        },
-        timeout: 60000
-      }
-    );
-
-    // 适配 OpenAI 响应结构（核心修改）
-    return response.data.choices?.[0]?.message?.content?.trim() || '生成全局总结失败';
+    return await callGemini(apiKey, model, summaryPrompt) || '生成全局总结失败';
   } catch (error) {
-    // 优化错误信息（兼容 OpenAI 错误响应格式）
     const errorMsg = error.response
-      ? `Request failed with status code ${error.response.status}，原因：${error.response.data?.error?.message || '未知错误'}`
+      ? `Request failed with status code ${error.response.status}，原因：${error.response.data?.error?.message || error.response.data?.message || '未知错误'}`
       : error.message;
 
     core.error(`全局总结生成失败: ${errorMsg}`);
@@ -444,7 +437,7 @@ async function setPRStatus(githubToken, isPassed, summary) {
       repo: context.repo.repo,
       sha: context.payload.pull_request.head.sha,
       state: state,
-      context: '千问代码评审',
+      context: 'Gemini 代码评审',
       description: description,
       target_url: context.payload.pull_request.html_url
     });
@@ -454,8 +447,8 @@ async function setPRStatus(githubToken, isPassed, summary) {
   }
 }
 
-// 调用千问API获取代码评审意见（主函数）
-async function getQianwenReview(fileDiffs, apiKey, model = 'qwen-turbo', ignoreComment = 'IGNORE') {
+// 调用 Gemini API 获取代码评审意见（主函数）
+async function getGeminiReview(fileDiffs, apiKey, model = 'gemini-2.5-flash', ignoreComment = 'IGNORE') {
   if (!fileDiffs || Object.keys(fileDiffs).length === 0) {
     const result = '所有变更文件均为忽略目录/包含忽略标记的文件，代码评审通过';
     await setPRStatus(core.getInput('github-token'), true, result);
@@ -549,7 +542,7 @@ async function submitReviewToGitHub(reviewContent, githubToken, commentTitle) {
 }
 
 module.exports = {
-  getQianwenReview,
+  getGeminiReview,
   submitReviewToGitHub,
   getCodeDiff
 };

@@ -1,7 +1,7 @@
 {
-    "name": "qianwen-code-review-action",
+    "name": "gemini-code-review-action",
     "version": "1.0.0",
-    "description": "Code review with Alibaba Qianwen",
+    "description": "Code review with Google Gemini",
     "main": "src/main.js",
     "scripts": {
         "build": "ncc build src/main.js -o dist",

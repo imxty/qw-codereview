@@ -1,14 +1,20 @@
-name: 'Qianwen Code Review'
-description: 'Automated code review using Alibaba Qianwen (通义千问) API'
+name: 'Gemini Code Review'
+description: 'Automated code review using Google Gemini API'
 author: 'Your Name'
 inputs:
-  qianwen-api-key:
-    description: 'API key for Alibaba Qianwen (通义千问)'
-    required: true
-  qianwen-model:
-    description: 'Qianwen model to use (e.g., qwen-turbo, qwen-plus)'
+  gemini-api-key:
+    description: 'API key for Google Gemini'
     required: false
-    default: 'qwen-turbo'
+  gemini-model:
+    description: 'Gemini model to use (e.g., gemini-2.5-flash, gemini-2.5-pro)'
+    required: false
+    default: 'gemini-2.5-flash'
+  qianwen-api-key:
+    description: 'Deprecated: use gemini-api-key instead'
+    required: false
+  qianwen-model:
+    description: 'Deprecated: use gemini-model instead'
+    required: false
   github-token:
     description: 'GitHub token with pull-requests: write permission'
     required: true
@@ -16,13 +22,17 @@ inputs:
   review-comment-title:
     description: 'Title of the review comment'
     required: false
-    default: '🤖 千问代码评审意见'
+    default: '🤖 Gemini 代码评审意见'
   ignore-comment:
     description: 'Comment pattern to ignore review (default: IGNORE)'
     required: false
     default: 'IGNORE'
   ignored-dirs:
     description: 'Additional ignored directories (comma separated, e.g., docs/,test/)'
+    required: false
+    default: ''
+  ignored-extensions:
+    description: 'Additional ignored file extensions (comma separated, e.g., .md,.json)'
     required: false
     default: ''
   batch-size:

@@ -1,11 +1,14 @@
 const core = require('@actions/core');
-const { getQianwenReview, submitReviewToGitHub, getCodeDiff } = require('./utils');
+const { getGeminiReview, submitReviewToGitHub, getCodeDiff } = require('./utils');
 
 async function run() {
     try {
         // 获取Action输入参数
-        const qianwenApiKey = core.getInput('qianwen-api-key', { required: true });
-        const qianwenModel = core.getInput('qianwen-model');
+        const geminiApiKey = core.getInput('gemini-api-key') || core.getInput('qianwen-api-key');
+        if (!geminiApiKey) {
+            throw new Error('缺少 Gemini API Key，请配置 gemini-api-key');
+        }
+        const geminiModel = core.getInput('gemini-model') || core.getInput('qianwen-model');
         const githubToken = core.getInput('github-token');
         const reviewCommentTitle = core.getInput('review-comment-title');
         const ignoreComment = core.getInput('ignore-comment');
@@ -18,15 +21,15 @@ async function run() {
         }
         core.info(`获取到 ${Object.keys(fileDiffs).length} 个文件的Diff`);
 
-        // 调用千问API进行代码评审
-        core.info('正在调用千问API进行代码评审...');
-        const reviewContent = await getQianwenReview(
+        // 调用 Gemini API 进行代码评审
+        core.info('正在调用 Gemini API 进行代码评审...');
+        const reviewContent = await getGeminiReview(
             fileDiffs,
-            qianwenApiKey,
-            qianwenModel,
+            geminiApiKey,
+            geminiModel,
             ignoreComment
         );
-        core.info('千问评审完成，结果：\n' + reviewContent);
+        core.info('Gemini 评审完成，结果：\n' + reviewContent);
 
         // 提交评审结果到GitHub
         core.info('正在提交评审结果到GitHub...');
