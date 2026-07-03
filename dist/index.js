@@ -33341,6 +33341,7 @@ const core = __nccwpck_require__(7484);
 const github = __nccwpck_require__(3228);
 
 const GEMINI_API_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
+const PASS_REVIEW_TEXT = 'LGTGEMINI';
 
 function getGeminiText(responseData) {
   return responseData?.candidates?.[0]?.content?.parts
@@ -33694,8 +33695,8 @@ async function retryOperation(operation, maxRetries, baseDelay = 2000) {
 
 // 过滤无意义的评审建议
 function filterTrivialSuggestions(review) {
-  if (review.trim() === 'LGTM' || review.trim() === '该文件修改无明显问题') {
-    return 'LGTM';
+  if ([PASS_REVIEW_TEXT, 'LGTM', '该文件修改无明显问题'].includes(review.trim())) {
+    return PASS_REVIEW_TEXT;
   }
 
   const lines = review.split('\n');
@@ -33719,9 +33720,9 @@ function filterTrivialSuggestions(review) {
   });
 
   const result = filtered.join('\n').trim();
-  // 如果过滤后没有实质性问题了，返回 LGTM
+  // 如果过滤后没有实质性问题了，返回通过标记
   const hasIssues = filtered.some(line => line.trim().startsWith('•'));
-  return hasIssues ? result : 'LGTM';
+  return hasIssues ? result : PASS_REVIEW_TEXT;
 }
 
 // 按文件进行AI评审
@@ -33754,14 +33755,14 @@ async function reviewFile(fileName, fileDiff, apiKey, model) {
 - 禁止提出”可能”、”建议”、”潜在”、”考虑”、”或许”、”应该”等不确定表述
 - 禁止提出代码风格、命名规范、性能、安全、逻辑等意见
 - 禁止提出修改前后内容相同的建议（如 error→error）
-- 没有确定错误时必须回复 “LGTM”，宁可漏报不可误报
+- 没有确定错误时必须回复 “${PASS_REVIEW_TEXT}”，宁可漏报不可误报
 
 【文件路径】${fileName}
 【代码变更】
 ${fileDiff}
 
 【输出格式】
-- 无问题：仅回复 “LGTM”
+- 无问题：仅回复 “${PASS_REVIEW_TEXT}”
 - 有问题：每条一行，格式为 “• [有问题的代码片段]: 具体问题说明”
 - 最多列出5条最关键的问题`.trim();
 
@@ -33785,7 +33786,7 @@ async function getGlobalSummary(fileReviews, apiKey, model) {
     请基于以下各文件的代码检查结果，生成简洁总结。
 
     要求：
-    1. 如果所有文件都是 "LGTM"，直接回复 "✅ 评审结论：通过"
+    1. 如果所有文件都是 "${PASS_REVIEW_TEXT}"，直接回复 "${PASS_REVIEW_TEXT}"
     2. 如果有语法/拼写问题，仅汇总已提到的问题，禁止新增任何未提及的问题
     3. 语言简洁，每条不超过30字
     4. 格式：先写"评审结论：通过/不通过"，再列出问题（如有）
@@ -33837,7 +33838,7 @@ async function setReviewStatus(githubToken, isPassed, summary) {
 // 调用 Gemini API 获取代码评审意见（主函数）
 async function getGeminiReview(fileDiffs, apiKey, model = 'gemini-2.5-flash', ignoreComment = 'IGNORE') {
   if (!fileDiffs || Object.keys(fileDiffs).length === 0) {
-    const result = '所有变更文件均为忽略目录/包含忽略标记的文件，代码评审通过';
+    const result = PASS_REVIEW_TEXT;
     await setReviewStatus(core.getInput('github-token'), true, result);
     return result;
   }
@@ -33858,12 +33859,18 @@ async function getGeminiReview(fileDiffs, apiKey, model = 'gemini-2.5-flash', ig
 
   // 分批评审
   const fileReviews = await batchPromise(reviewOperations, batchSize, maxRetries);
+  const allPassed = fileReviews.every(r => r.review === PASS_REVIEW_TEXT);
+
+  if (allPassed) {
+    await setReviewStatus(core.getInput('github-token'), true, PASS_REVIEW_TEXT);
+    return PASS_REVIEW_TEXT;
+  }
 
   // 生成全局总结
   const globalSummary = await getGlobalSummary(fileReviews, apiKey, model);
 
   // 判断是否通过并设置PR状态
-  const isPassed = globalSummary.includes('评审结论：通过') || globalSummary.includes('LGTM');
+  const isPassed = globalSummary.includes('评审结论：通过') || globalSummary.includes(PASS_REVIEW_TEXT) || globalSummary.includes('LGTM');
   await setReviewStatus(core.getInput('github-token'), isPassed, globalSummary);
 
   // 构建最终结果
@@ -33871,9 +33878,9 @@ async function getGeminiReview(fileDiffs, apiKey, model = 'gemini-2.5-flash', ig
 ## 代码评审结果
 ### 文件评审明细（共${totalFiles}个文件）：
 ${fileReviews
-      .filter(r => r.review !== 'LGTM') // 过滤无问题的文件
+      .filter(r => r.review !== PASS_REVIEW_TEXT) // 过滤无问题的文件
       .map(r => `\n#### ${r.fileName}\n${r.review}`)
-      .join('\n') || '所有文件均无明显问题'}
+      .join('\n') || PASS_REVIEW_TEXT}
 
 ---
 ### 全局评审总结
