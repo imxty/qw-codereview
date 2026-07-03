@@ -33534,26 +33534,7 @@ async function getAllPRFiles(octokit, owner, repo, pullNumber) {
   return allFiles;
 }
 
-// 获取代码Diff（按文件分割）
-async function getCodeDiff(githubToken) {
-  const octokit = github.getOctokit(githubToken);
-  const context = github.context;
-  const ignoreComment = core.getInput('ignore-comment') || 'IGNORE';
-
-  // 强制仅支持PR事件
-  if (!context.payload.pull_request) {
-    core.error('该脚本仅支持PR事件，请在PR触发的Workflow中使用');
-    throw new Error('仅支持PR事件，不支持Push等其他事件');
-  }
-
-  const pullNumber = context.payload.pull_request.number;
-  const owner = context.repo.owner;
-  const repo = context.repo.repo;
-
-  // curl -L \
-  // -H "Accept: application/vnd.github.v3.diff" \
-  // -H "Authorization: token xxxx" \
-  // "https://api.github.com/repos/xx/xxxx/pulls/21"
+async function getPullRequestDiff(octokit, owner, repo, pullNumber, ignoreComment) {
   try {
     core.info('尝试获取PR完整Diff...');
     const { data: diffData } = await octokit.rest.pulls.get({
@@ -33592,6 +33573,72 @@ async function getCodeDiff(githubToken) {
     }
     throw error;
   }
+}
+
+async function getPushDiff(octokit, owner, repo, payload, ignoreComment) {
+  const before = payload.before;
+  const after = payload.after;
+  const isCreateBranchPush = !before || /^0+$/.test(before);
+
+  if (!after || /^0+$/.test(after)) {
+    core.info('Push事件没有可评审的目标提交，跳过评审');
+    return {};
+  }
+
+  if (!isCreateBranchPush) {
+    core.info(`尝试获取Push Diff: ${before}...${after}`);
+    const { data: diffData } = await octokit.request('GET /repos/{owner}/{repo}/compare/{basehead}', {
+      owner,
+      repo,
+      basehead: `${before}...${after}`,
+      headers: {
+        accept: 'application/vnd.github.v3.diff'
+      }
+    });
+    return getFileDiffs(diffData, ignoreComment);
+  }
+
+  core.warning('检测到新建分支Push，无法通过before提交比较，将使用最新提交文件patch');
+  const { data: commit } = await octokit.rest.repos.getCommit({
+    owner,
+    repo,
+    ref: after
+  });
+
+  const fileDiffs = {};
+  for (const file of commit.files || []) {
+    if (file.status === 'removed' || file.status === 'renamed' || isFileIgnored(file.filename) || !file.patch) {
+      continue;
+    }
+
+    const fileDiff = `diff --git a/${file.filename} b/${file.filename}\n${file.patch}`;
+    if (!fileDiff.includes(ignoreComment)) {
+      fileDiffs[file.filename] = fileDiff;
+    }
+  }
+
+  core.info(`解析出 ${Object.keys(fileDiffs).length} 个需评审的文件`);
+  return fileDiffs;
+}
+
+// 获取代码Diff（按文件分割）
+async function getCodeDiff(githubToken) {
+  const octokit = github.getOctokit(githubToken);
+  const context = github.context;
+  const ignoreComment = core.getInput('ignore-comment') || 'IGNORE';
+  const owner = context.repo.owner;
+  const repo = context.repo.repo;
+
+  if (context.payload.pull_request) {
+    return getPullRequestDiff(octokit, owner, repo, context.payload.pull_request.number, ignoreComment);
+  }
+
+  if (context.eventName === 'push') {
+    return getPushDiff(octokit, owner, repo, context.payload, ignoreComment);
+  }
+
+  core.error(`当前事件 ${context.eventName} 暂不支持，请使用pull_request或push触发`);
+  throw new Error(`仅支持pull_request或push事件，不支持${context.eventName}`);
 }
 
 // 分批处理Promise（控制并发）
@@ -33759,29 +33806,31 @@ async function getGlobalSummary(fileReviews, apiKey, model) {
   }
 }
 
-// 设置PR状态（通过/不通过）
-async function setPRStatus(githubToken, isPassed, summary) {
+// 设置评审状态（通过/不通过）
+async function setReviewStatus(githubToken, isPassed, summary) {
   const octokit = github.getOctokit(githubToken);
   const context = github.context;
 
-  if (!context.payload.pull_request) return;
-
   const state = isPassed ? 'success' : 'failure';
   const description = isPassed ? '代码评审通过' : '代码评审存在问题，需优化';
+  const sha = context.payload.pull_request?.head?.sha || context.payload.after;
+  const targetUrl = context.payload.pull_request?.html_url || context.payload.head_commit?.url;
+
+  if (!sha || /^0+$/.test(sha)) return;
 
   try {
     await octokit.rest.repos.createCommitStatus({
       owner: context.repo.owner,
       repo: context.repo.repo,
-      sha: context.payload.pull_request.head.sha,
+      sha,
       state: state,
       context: 'Gemini 代码评审',
       description: description,
-      target_url: context.payload.pull_request.html_url
+      target_url: targetUrl
     });
-    core.info(`PR状态已设置为：${state}（${description}）`);
+    core.info(`评审状态已设置为：${state}（${description}）`);
   } catch (error) {
-    core.error(`设置PR状态失败: ${error.message}`);
+    core.error(`设置评审状态失败: ${error.message}`);
   }
 }
 
@@ -33789,7 +33838,7 @@ async function setPRStatus(githubToken, isPassed, summary) {
 async function getGeminiReview(fileDiffs, apiKey, model = 'gemini-2.5-flash', ignoreComment = 'IGNORE') {
   if (!fileDiffs || Object.keys(fileDiffs).length === 0) {
     const result = '所有变更文件均为忽略目录/包含忽略标记的文件，代码评审通过';
-    await setPRStatus(core.getInput('github-token'), true, result);
+    await setReviewStatus(core.getInput('github-token'), true, result);
     return result;
   }
 
@@ -33815,7 +33864,7 @@ async function getGeminiReview(fileDiffs, apiKey, model = 'gemini-2.5-flash', ig
 
   // 判断是否通过并设置PR状态
   const isPassed = globalSummary.includes('评审结论：通过') || globalSummary.includes('LGTM');
-  await setPRStatus(core.getInput('github-token'), isPassed, globalSummary);
+  await setReviewStatus(core.getInput('github-token'), isPassed, globalSummary);
 
   // 构建最终结果
   const finalResult = `
@@ -33840,9 +33889,10 @@ async function submitReviewToGitHub(reviewContent, githubToken, commentTitle) {
   const context = github.context;
   const MAX_COMMENT_LENGTH = 65536; // GitHub评论最大长度限制
 
-  const issueNumber = context.payload.pull_request.number;
   const owner = context.repo.owner;
   const repo = context.repo.repo;
+  const issueNumber = context.payload.pull_request?.number;
+  const commitSha = context.payload.after;
 
   // 拆分内容为多个块
   const chunks = [];
@@ -33856,27 +33906,47 @@ async function submitReviewToGitHub(reviewContent, githubToken, commentTitle) {
     currentPosition += chunkLength;
   }
 
-  // 提交第一个块（带完整标题）
-  await octokit.rest.issues.createComment({
-    owner,
-    repo,
-    issue_number: issueNumber,
-    body: `### ${commentTitle}\n\n${chunks[0]}`
-  });
-
-  // 提交剩余块（带续篇标记）
-  for (let i = 1; i < chunks.length; i++) {
+  if (issueNumber) {
+    // 提交第一个块（带完整标题）
     await octokit.rest.issues.createComment({
       owner,
       repo,
       issue_number: issueNumber,
-      body: `### ${commentTitle}（续${i}/${chunks.length - 1}）\n\n${chunks[i]}`
+      body: `### ${commentTitle}\n\n${chunks[0]}`
     });
-    // 避免API请求过于频繁
+
+    // 提交剩余块（带续篇标记）
+    for (let i = 1; i < chunks.length; i++) {
+      await octokit.rest.issues.createComment({
+        owner,
+        repo,
+        issue_number: issueNumber,
+        body: `### ${commentTitle}（续${i}/${chunks.length - 1}）\n\n${chunks[i]}`
+      });
+      // 避免API请求过于频繁
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+
+    core.info(`评审意见已分${chunks.length}部分提交到PR #${issueNumber}`);
+    return;
+  }
+
+  if (!commitSha || /^0+$/.test(commitSha)) {
+    core.warning('当前事件没有可评论的commit，跳过提交评审评论');
+    return;
+  }
+
+  for (let i = 0; i < chunks.length; i++) {
+    await octokit.rest.repos.createCommitComment({
+      owner,
+      repo,
+      commit_sha: commitSha,
+      body: `### ${commentTitle}${i === 0 ? '' : `（续${i}/${chunks.length - 1}）`}\n\n${chunks[i]}`
+    });
     await new Promise(resolve => setTimeout(resolve, 1000));
   }
 
-  core.info(`评审意见已分${chunks.length}部分提交到PR #${issueNumber}`);
+  core.info(`评审意见已分${chunks.length}部分提交到Commit ${commitSha}`);
 }
 
 module.exports = {

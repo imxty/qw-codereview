@@ -5,6 +5,7 @@
     "main": "src/main.js",
     "scripts": {
         "build": "ncc build src/main.js -o dist",
+        "release": "./scripts/release-tag.sh",
         "precommit": "npm run build"
     },
     "dependencies": {
